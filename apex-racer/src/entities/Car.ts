@@ -88,10 +88,14 @@ export class Car implements Updatable {
   private readonly prevPosition = new THREE.Vector3()
   private prevHeading = 0
 
-  constructor(controls: Controls, config: Partial<CarConfig> = {}) {
+  constructor(
+    controls: Controls,
+    config: Partial<CarConfig> = {},
+    paintColor = 0xd62828,
+  ) {
     this.controls = controls
     this.config = { ...DEFAULT_CAR_CONFIG, ...config }
-    this.buildModel()
+    this.buildModel(paintColor)
     this.interpolate(1)
   }
 
@@ -225,8 +229,8 @@ export class Car implements Updatable {
     this.body.rotation.z = this.roll
   }
 
-  private buildModel(): void {
-    const paint = new THREE.MeshStandardMaterial({ color: 0xd62828, roughness: 0.45, metalness: 0.3 })
+  private buildModel(paintColor: number): void {
+    const paint = new THREE.MeshStandardMaterial({ color: paintColor, roughness: 0.45, metalness: 0.3 })
     const glass = new THREE.MeshStandardMaterial({ color: 0x1b2a3a, roughness: 0.2, metalness: 0.6 })
     const tyre = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.9 })
     const rim = new THREE.MeshStandardMaterial({ color: 0xbbbbbb, roughness: 0.4, metalness: 0.8 })

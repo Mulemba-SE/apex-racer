@@ -1,14 +1,18 @@
 import * as THREE from 'three'
+import { AudioEngine } from '@/core/AudioEngine'
 import { BestTimes } from '@/core/BestTimes'
 import { Game } from '@/core/Game'
-import { Input } from '@/core/Input'
+import { Input, type Controls } from '@/core/Input'
 import { RaceController } from '@/core/RaceController'
 import { Car } from '@/entities/Car'
 import { Track } from '@/entities/Track'
-import { TrackData, CIRCUIT_ONE } from '@/entities/TrackData'
+import { TrackData, CIRCUIT_ONE, type Pose } from '@/entities/TrackData'
+import { AIDriver, type AIOptions } from '@/systems/AIDriver'
 import { CameraRig } from '@/systems/CameraRig'
 import { LapTracker } from '@/systems/LapTracker'
 import { TrackCollision } from '@/systems/TrackCollision'
+import { Hud } from '@/ui/Hud'
+import { Minimap } from '@/ui/Minimap'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
 
@@ -24,8 +28,8 @@ const SKY = 0x87b8e8
 game.scene.background = new THREE.Color(SKY)
 game.scene.fog = new THREE.Fog(SKY, 200, 1000)
 
-// Lighting. The sun follows the car (see the render hook below), so the
-// shadow map only has to cover the area around the car.
+// Lighting. The sun follows the player's car (see the render hook below), so the
+// shadow map only has to cover the area around it.
 game.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.0))
 const sun = new THREE.DirectionalLight(0xffffff, 2.2)
 const SUN_OFFSET = new THREE.Vector3(30, 50, 20)
@@ -54,13 +58,66 @@ game.scene.add(grass)
 const track = new Track(new TrackData(CIRCUIT_ONE))
 game.scene.add(track.object)
 
-// Input, car, camera.
+// ---------------------------------------------------------------------------
+// Starting grid: slot 0 is pole position. `back` is metres behind the start
+// line, and `side` is the offset from the centre line (positive is right).
+// ---------------------------------------------------------------------------
+
+const GRID = [
+  { back: 8, side: -2.5 },
+  { back: 8, side: 2.5 },
+  { back: 16, side: -2.5 },
+  { back: 16, side: 2.5 },
+] as const
+
+const PLAYER_SLOT = 3 // change to 0 to start on pole
+
+function gridPose(slot: number): Pose {
+  const { back, side } = GRID[slot]!
+  const s = track.data.sampleAt(Math.round(-back / track.data.spacing))
+  return {
+    x: s.position.x + s.right.x * side,
+    z: s.position.z + s.right.z * side,
+    heading: Math.atan2(-s.tangent.x, -s.tangent.z), // same conversion as TrackData.poseAt()
+  }
+}
+
+// Player: input, car, camera.
 const input = new Input()
 const car = new Car(input.controls)
-const grid = track.data.poseAt(-10) // 10 m behind the start line
-car.reset(grid.x, grid.z, grid.heading)
+const playerGrid = gridPose(PLAYER_SLOT)
+car.reset(playerGrid.x, playerGrid.z, playerGrid.heading)
 game.scene.add(car.object)
 const rig = new CameraRig(game.camera, car) // after the reset, so it starts behind the car
+
+// AI opponents. Each one has its own Controls object, written by its driver.
+// Drivers differ in pace and in the line they take. Keep laneOffset within
+// about +-4 m so they stay on the asphalt.
+interface BotSetup {
+  slot: number
+  color: number
+  options: Partial<AIOptions>
+}
+
+const BOT_SETUPS: BotSetup[] = [
+  { slot: 0, color: 0x2a6fdb, options: { topSpeedFraction: 0.95, cornerAccel: 24, laneOffset: -2.5 } },
+  { slot: 1, color: 0xf2c14e, options: { topSpeedFraction: 0.9, cornerAccel: 22, laneOffset: 2.5 } },
+  { slot: 2, color: 0x2fb36a, options: { topSpeedFraction: 0.85, cornerAccel: 20, laneOffset: -1 } },
+]
+
+const bots = BOT_SETUPS.map(({ slot, color, options }) => {
+  const controls: Controls = { throttle: 0, brake: 0, steer: 0, handbrake: false }
+  const botCar = new Car(controls, {}, color)
+  const pose = gridPose(slot)
+  botCar.reset(pose.x, pose.z, pose.heading)
+  game.scene.add(botCar.object)
+  return {
+    car: botCar,
+    driver: new AIDriver(botCar, controls, track.data, options),
+    collision: new TrackCollision(botCar, track.data),
+    grid: pose,
+  }
+})
 
 // Race systems. The tracker is created after the car is on the grid, because
 // it reads the car's position when it is built.
@@ -72,115 +129,85 @@ const race = new RaceController({
   tracker,
   bestTimes: new BestTimes(track.data.definition.name),
   respawn: () => {
-    car.reset(grid.x, grid.z, grid.heading)
+    car.reset(playerGrid.x, playerGrid.z, playerGrid.heading)
     rig.snap()
+    for (const bot of bots) {
+      bot.car.reset(bot.grid.x, bot.grid.z, bot.grid.heading)
+      bot.driver.reset()
+    }
   },
 })
 
+// The AI drives from GO onwards, and keeps racing after you finish.
+race.onStateChange = (state) => {
+  for (const bot of bots) bot.driver.enabled = state === 'racing' || state === 'finished'
+}
+
 // Fixed-step order matters:
-// the input is sampled, the race controller applies locks and brakes, the car
-// moves, the collision corrects it, and the tracker reads the final position.
+// the input is sampled, the race controller applies locks and brakes, the AI
+// drivers press their pedals, every car moves, each collision corrects its own
+// car, and the tracker reads the player's final position.
 game.add(input)
 game.add(race)
+for (const bot of bots) game.add(bot.driver)
 game.add(car)
+for (const bot of bots) game.add(bot.car)
 game.add(collision)
+for (const bot of bots) game.add(bot.collision)
 game.add(tracker)
 
-// ---------------------------------------------------------------------------
-// Temporary text readout. Segment 8 replaces this with a proper HUD.
-// ---------------------------------------------------------------------------
+// UI and audio.
+const hudContainer = document.getElementById('hud')!
+const hud = new Hud(hudContainer)
+const minimap = new Minimap(hudContainer, track.data)
+const audio = new AudioEngine()
 
-const hud = document.getElementById('hud')!
-
-const readout = document.createElement('pre')
-Object.assign(readout.style, {
-  position: 'absolute',
-  top: '8px',
-  right: '12px',
-  margin: '0',
-  padding: '8px 10px',
-  font: '600 16px/1.5 ui-monospace, monospace',
-  color: '#fff',
-  background: 'rgba(0, 0, 0, 0.45)',
-  textShadow: '0 1px 2px #000',
-  whiteSpace: 'pre',
-})
-hud.appendChild(readout)
-
-const banner = document.createElement('div')
-Object.assign(banner.style, {
-  position: 'absolute',
-  top: '24%',
-  left: '0',
-  width: '100%',
-  textAlign: 'center',
-  color: '#fff',
-  textShadow: '0 2px 8px #000',
-  whiteSpace: 'pre',
-})
-const bannerTitle = document.createElement('div')
-bannerTitle.style.font = '800 80px/1.1 system-ui'
-const bannerSub = document.createElement('div')
-bannerSub.style.font = '600 20px/1.5 system-ui'
-banner.append(bannerTitle, bannerSub)
-hud.appendChild(banner)
-
-function setText(el: HTMLElement, text: string): void {
-  if (el.textContent !== text) el.textContent = text // avoids touching the page when nothing changed
+race.onCountdownTick = (value) => audio.countdownTick(value)
+race.onLap = (result) => {
+  hud.showLapToast(result.lap, result.time, result.isBest)
+  audio.lapChime(result.isBest)
 }
+race.onFinish = () => audio.finish()
+collision.onImpact = (speed) => audio.impact(speed) // only the player's crashes are audible
 
-function formatTime(seconds: number | null): string {
-  if (seconds === null) return '-:--.---'
-  const ms = Math.round(Math.max(0, seconds) * 1000)
-  const m = Math.floor(ms / 60000)
-  const s = (ms % 60000) / 1000
-  return `${m}:${s.toFixed(3).padStart(6, '0')}`
-}
-
-function updateHud(): void {
-  const lapShown = race.state === 'menu' ? '-' : String(tracker.currentLap)
-  setText(
-    readout,
-    [
-      `LAP    ${lapShown}/${tracker.totalLaps}`,
-      `TIME   ${formatTime(tracker.currentLapTime)}`,
-      `LAST   ${formatTime(tracker.lastLap)}`,
-      `BEST   ${formatTime(tracker.bestLap)}`,
-      `SPEED  ${Math.round(car.speedKmh)} km/h`,
-    ].join('\n'),
-  )
-
-  let title = ''
-  let sub = ''
-  switch (race.state) {
-    case 'menu':
-      title = 'APEX RACER'
-      sub = 'Press ENTER to start\nW/S throttle and brake   A/D steer   SPACE handbrake   R restart'
-      break
-    case 'countdown':
-    case 'racing':
-      title = race.countdownText
-      break
-    case 'finished':
-      title = 'FINISH'
-      sub =
-        `Race ${formatTime(tracker.raceTime)}  |  Best lap ${formatTime(tracker.bestLap)}\n` +
-        'Press ENTER to race again'
-      break
-  }
-  setText(bannerTitle, title)
-  setText(bannerSub, sub)
-}
-
-// Once per display frame: place the car between its last two physics steps,
-// move the camera to follow it, keep the sun's shadow box over the car,
-// then refresh the readout.
+// Once per display frame: place every car between its last two physics steps,
+// move the camera to follow the player, keep the sun's shadow box over the
+// player, then refresh the HUD, minimap and audio.
 game.addRenderHook((alpha, frameDt) => {
   car.interpolate(alpha)
+  for (const bot of bots) bot.car.interpolate(alpha)
   rig.update(frameDt)
   sun.position.copy(car.object.position).add(SUN_OFFSET)
   sun.target.position.copy(car.object.position)
-  updateHud()
+
+  const speedFraction = car.velocity.length() / car.config.maxSpeed
+
+  hud.update({
+    state: race.state,
+    countdownText: race.countdownText,
+    lap: tracker.currentLap,
+    totalLaps: tracker.totalLaps,
+    lapTime: tracker.currentLapTime,
+    lastLap: tracker.lastLap,
+    bestLap: tracker.bestLap,
+    raceTime: tracker.raceTime,
+    speedKmh: car.speedKmh,
+    speedFraction,
+  })
+
+  minimap.update(car.object.position.x, car.object.position.z, car.object.rotation.y)
+
+  // Sideways speed in m/s: the part of the velocity along the car's right-hand axis.
+  const sin = Math.sin(car.heading)
+  const cos = Math.cos(car.heading)
+  const slip = car.velocity.x * cos - car.velocity.z * sin
+
+  audio.update({
+    engineOn: race.state !== 'menu',
+    speedFraction,
+    throttle: input.controls.throttle,
+    slip,
+  })
 })
 
 game.start()
@@ -188,8 +215,9 @@ game.start()
 // Avoid duplicate games and listeners when Vite hot-reloads this file.
 import.meta.hot?.dispose(() => {
   input.dispose()
+  audio.dispose()
+  minimap.dispose()
+  hud.dispose()
   track.dispose()
   game.dispose()
-  readout.remove()
-  banner.remove()
 })
