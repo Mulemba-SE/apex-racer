@@ -14,6 +14,7 @@ const BINDINGS = {
   right: ['KeyD', 'ArrowRight'],
   handbrake: ['Space'],
   reset: ['KeyR'],
+  confirm: ['Enter', 'NumpadEnter'], // new: starts the race from the menu
 } as const
 
 const BOUND_CODES = new Set<string>(Object.values(BINDINGS).flat())
@@ -30,8 +31,15 @@ export class Input {
     handbrake: false,
   }
 
+  /**
+   * New: while true, the car sees no input at all. Held keys are remembered, so
+   * anything still held when the lock ends takes effect on the next step.
+   */
+  locked = false
+
   private readonly keys = new Set<string>()
   private resetQueued = false
+  private confirmQueued = false // new
 
   constructor() {
     window.addEventListener('keydown', this.onKeyDown)
@@ -42,16 +50,30 @@ export class Input {
   /** Samples the held keys into `controls`. Call once per fixed step. */
   update(_dt: number): void {
     const c = this.controls
+    if (this.locked) {
+      c.throttle = 0
+      c.brake = 0
+      c.steer = 0
+      c.handbrake = false
+      return
+    }
     c.throttle = this.down(BINDINGS.throttle) ? 1 : 0
     c.brake = this.down(BINDINGS.brake) ? 1 : 0
     c.steer = (this.down(BINDINGS.right) ? 1 : 0) - (this.down(BINDINGS.left) ? 1 : 0)
     c.handbrake = this.down(BINDINGS.handbrake)
   }
 
-  /** True once per press of the reset key, then false until pressed again. */
+  /** True once per press of the reset key, then false until pressed again. Works while locked. */
   consumeReset(): boolean {
     const queued = this.resetQueued
     this.resetQueued = false
+    return queued
+  }
+
+  /** New: true once per press of Enter, then false until pressed again. Works while locked. */
+  consumeConfirm(): boolean {
+    const queued = this.confirmQueued
+    this.confirmQueued = false
     return queued
   }
 
@@ -69,7 +91,9 @@ export class Input {
     if (!BOUND_CODES.has(e.code)) return
     e.preventDefault() // stops Space and the arrows from scrolling or clicking things
     this.keys.add(e.code)
-    if (!e.repeat && matches(BINDINGS.reset, e.code)) this.resetQueued = true
+    if (e.repeat) return
+    if (matches(BINDINGS.reset, e.code)) this.resetQueued = true
+    if (matches(BINDINGS.confirm, e.code)) this.confirmQueued = true // new
   }
 
   private onKeyUp = (e: KeyboardEvent): void => {

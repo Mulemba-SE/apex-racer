@@ -51,6 +51,9 @@ export const CIRCUIT_ONE: TrackDefinition = {
 
 const UP = new THREE.Vector3(0, 1, 0)
 export const BARRIER_MARGIN = 4 // metres beyond the road edge where the barrier goes
+export const KERB_WIDTH = 1.2 // metres, the red and white strip along each road edge
+const SEARCH_WINDOW = 30 // samples either side of a hint to search (about 60 m)
+
 export class TrackData {
   readonly definition: TrackDefinition
   readonly width: number
@@ -117,6 +120,40 @@ export class TrackData {
     }
   }
 
+  /** Sideways distance from the centre line to the inner face of the barriers. */
+  get wallOffset(): number {
+    return this.halfWidth + BARRIER_MARGIN
+  }
+
+  /** Sideways distance from the centre line where the kerb ends and the grass starts. */
+  get grassOffset(): number {
+    return this.halfWidth + KERB_WIDTH
+  }
+
+  /**
+   * Index of the centre-line sample closest to (x, z). Pass the previous result
+   * as `hint` to search only nearby. That is faster, and it can't jump to a
+   * different part of the track that happens to pass close by.
+   */
+  nearestIndex(x: number, z: number, hint = -1): number {
+    if (hint >= 0) {
+      const near = this.closest(x, z, hint - SEARCH_WINDOW, hint + SEARCH_WINDOW)
+      const p = this.sampleAt(near).position
+      const limit = this.wallOffset + 10
+      const dx = x - p.x
+      const dz = z - p.z
+      if (dx * dx + dz * dz <= limit * limit) return near
+      // Far from where we expected, so fall through and search the whole track.
+    }
+    return this.closest(x, z, 0, this.samples.length - 1)
+  }
+
+  /** Signed sideways distance from the centre line at sample `index`: positive is right of travel. */
+  lateralOffset(x: number, z: number, index: number): number {
+    const s = this.sampleAt(index)
+    return (x - s.position.x) * s.right.x + (z - s.position.z) * s.right.z
+  }
+
   private computeMinRadius(): number {
     const n = this.samples.length
     let min = Infinity
@@ -127,5 +164,22 @@ export class TrackData {
       if (angle > 1e-6) min = Math.min(min, this.spacing / angle)
     }
     return min
+  }
+
+  private closest(x: number, z: number, from: number, to: number): number {
+    let best = from
+    let bestDist = Infinity
+    for (let i = from; i <= to; i++) {
+      const p = this.sampleAt(i).position // sampleAt wraps, so from/to may be out of range
+      const dx = x - p.x
+      const dz = z - p.z
+      const d = dx * dx + dz * dz
+      if (d < bestDist) {
+        bestDist = d
+        best = i
+      }
+    }
+    const n = this.samples.length
+    return ((best % n) + n) % n
   }
 }

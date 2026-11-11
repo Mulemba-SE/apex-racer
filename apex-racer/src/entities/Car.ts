@@ -30,8 +30,25 @@ export const DEFAULT_CAR_CONFIG: CarConfig = {
   handbrakeGrip: 1.5,
 }
 
+/** Half the car's footprint in metres. Collision tests the corners of this box. */
+export const CAR_HALF_WIDTH = 0.95
+export const CAR_HALF_LENGTH = 2.1
+
+/** How the ground under the car changes its handling. 1 = same as asphalt. */
+export interface SurfaceModifiers {
+  grip: number // multiplies sideways grip; lower means more sliding
+  traction: number // multiplies acceleration
+  drag: number // 1/s, how quickly forward speed bleeds off (0 = none)
+}
+
+export const ASPHALT: SurfaceModifiers = { grip: 1, traction: 1, drag: 0 }
+export const KERB: SurfaceModifiers = { grip: 0.85, traction: 0.9, drag: 0.05 }
+export const GRASS: SurfaceModifiers = { grip: 0.4, traction: 0.5, drag: 0.5 }
+
 const WHEEL_RADIUS = 0.35
 const MAX_WHEEL_LOCK = 0.45 // radians, visual only
+const MAX_YAW_KICK = 4 // rad/s
+const YAW_KICK_DECAY = 5 // 1/s
 
 function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v))
@@ -53,6 +70,9 @@ export class Car implements Updatable {
   readonly velocity = new THREE.Vector3() // world space, m/s, y unused
   heading = 0
 
+  /** Set every step by the collision system. */
+  surface: SurfaceModifiers = ASPHALT
+
   private readonly controls: Controls
   private readonly body = new THREE.Group() // rolls in corners; wheels don't
   private readonly wheels: THREE.Mesh[] = []
@@ -62,6 +82,7 @@ export class Car implements Updatable {
   private readonly right = new THREE.Vector3()
   private steerValue = 0 // smoothed steering, -1..1
   private roll = 0
+  private yawKick = 0 // rad/s of extra spin from impacts; decays on its own
 
   // Previous step, kept for render interpolation.
   private readonly prevPosition = new THREE.Vector3()
@@ -82,6 +103,7 @@ export class Car implements Updatable {
   update(dt: number): void {
     const c = this.controls
     const cfg = this.config
+    const surface = this.surface
 
     this.prevPosition.copy(this.position)
     this.prevHeading = this.heading
@@ -100,21 +122,27 @@ export class Car implements Updatable {
         vf += cfg.brakeDecel * dt // throttle while rolling backwards = brake
       } else {
         const headroom = 1 - Math.max(vf, 0) / cfg.maxSpeed // eases into top speed
-        vf += cfg.acceleration * drive * headroom * dt
+        vf += cfg.acceleration * surface.traction * drive * headroom * dt
       }
     } else if (drive < 0) {
       if (vf > 0.5) {
         vf = Math.max(vf + cfg.brakeDecel * drive * dt, 0)
       } else {
-        vf = Math.max(vf + cfg.acceleration * 0.6 * drive * dt, -cfg.maxReverseSpeed)
+        vf = Math.max(
+          vf + cfg.acceleration * 0.6 * surface.traction * drive * dt,
+          -cfg.maxReverseSpeed,
+        )
       }
     } else {
       vf = moveToward(vf, 0, cfg.coastDecel * dt)
     }
     if (c.handbrake) vf = moveToward(vf, 0, cfg.handbrakeDecel * dt)
 
+    // Surface drag: grass bleeds off speed in proportion to how fast you are going.
+    if (surface.drag > 0) vf *= Math.exp(-surface.drag * dt)
+
     // Sideways slip decays; less grip with the handbrake means a longer slide.
-    const grip = c.handbrake ? cfg.handbrakeGrip : cfg.grip
+    const grip = (c.handbrake ? cfg.handbrakeGrip : cfg.grip) * surface.grip
     vl *= Math.exp(-grip * dt)
 
     // Smooth the steering input.
@@ -137,6 +165,8 @@ export class Car implements Updatable {
       .multiplyScalar(vf)
       .addScaledVector(this.right, vl)
     this.heading -= yawRate * dt // steering right (positive) lowers heading
+    this.heading += this.yawKick * dt // impact spin; positive turns the car left
+    this.yawKick *= Math.exp(-YAW_KICK_DECAY * dt)
     this.position.addScaledVector(this.velocity, dt)
 
     this.animate(dt, vf)
@@ -144,9 +174,17 @@ export class Car implements Updatable {
   }
 
   /**
+   * Adds a short burst of spin from an impact, in rad/s. Positive turns the car
+   * left. It fades out by itself, so callers don't need to undo it.
+   */
+  kick(yawRate: number): void {
+    this.yawKick = clamp(this.yawKick + yawRate, -MAX_YAW_KICK, MAX_YAW_KICK)
+  }
+
+  /**
    * Places the visual transform between the previous and current step.
-   * alpha = 1 means "exactly the current step". Later we call this from the
-   * render callback so motion stays smooth on 120/144 Hz displays.
+   * alpha = 1 means "exactly the current step". It is called from the render
+   * hook so motion stays smooth on 120/144 Hz displays.
    */
   interpolate(alpha: number): void {
     this.object.position.lerpVectors(this.prevPosition, this.position, alpha)
@@ -159,6 +197,8 @@ export class Car implements Updatable {
     this.heading = heading
     this.steerValue = 0
     this.roll = 0
+    this.yawKick = 0
+    this.surface = ASPHALT
     this.prevPosition.copy(this.position)
     this.prevHeading = heading
     this.interpolate(1)

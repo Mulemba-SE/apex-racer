@@ -1,7 +1,6 @@
 import * as THREE from 'three'
-import { BARRIER_MARGIN, type TrackData } from '@/entities/TrackData'
+import { BARRIER_MARGIN, KERB_WIDTH, type TrackData } from '@/entities/TrackData'
 
-const KERB_WIDTH = 1.2
 const KERB_HEIGHT = 0.03
 const BARRIER_HEIGHT = 1.0
 const BARRIER_THICKNESS = 0.5
