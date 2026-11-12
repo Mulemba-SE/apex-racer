@@ -5,18 +5,35 @@ import { Game } from '@/core/Game'
 import { Input, type Controls } from '@/core/Input'
 import { RaceController } from '@/core/RaceController'
 import { Car } from '@/entities/Car'
+import { CarModelLoader, type CarModelOptions } from '@/entities/CarModel'
 import { Track } from '@/entities/Track'
 import { TrackData, CIRCUIT_ONE, type Pose } from '@/entities/TrackData'
 import { AIDriver, type AIOptions } from '@/systems/AIDriver'
 import { CameraRig } from '@/systems/CameraRig'
 import { CarCollision } from '@/systems/CarCollision'
 import { LapTracker } from '@/systems/LapTracker'
+import { SkidMarks } from '@/systems/SkidMarks'
+import { Smoke } from '@/systems/Smoke'
 import { Standings } from '@/systems/Standings'
 import { TrackCollision } from '@/systems/TrackCollision'
 import { Hud } from '@/ui/Hud'
+import { LoadingScreen } from '@/ui/LoadingScreen'
 import { Minimap, type MinimapDot } from '@/ui/Minimap'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
+
+// The car model, served from public/models/car.glb. BASE_URL keeps the path correct
+// when the game is hosted in a sub-folder (GitHub Pages, for example).
+const MODEL_URL = `${import.meta.env.BASE_URL}models/car.glb`
+const MODEL_TIMEOUT_MS = 15000
+const MODEL_OPTIONS: Omit<CarModelOptions, 'url' | 'paintColor'> = {
+  yaw: Math.PI, // 0 if the car drives backwards, +-Math.PI / 2 if it points sideways
+  // paintPattern: /body|paint/i, // which material names count as paint; see the console message
+}
+const PLAYER_COLOR = 0xd62828
+
+// Shown immediately, and removed once the car model has loaded (or failed to).
+const loading = new LoadingScreen()
 
 const game = new Game(document.getElementById('app')!)
 
@@ -86,7 +103,7 @@ function gridPose(slot: number): Pose {
 
 // Player: input, car, camera.
 const input = new Input()
-const car = new Car(input.controls)
+const car = new Car(input.controls, {}, PLAYER_COLOR)
 const playerGrid = gridPose(PLAYER_SLOT)
 car.reset(playerGrid.x, playerGrid.z, playerGrid.heading)
 game.scene.add(car.object)
@@ -122,6 +139,12 @@ const bots = BOT_SETUPS.map(({ slot, color, options }) => {
   }
 })
 
+// Tyre marks and smoke for every car.
+const skidMarks = new SkidMarks([car, ...bots.map((b) => b.car)])
+game.scene.add(skidMarks.object)
+const smoke = new Smoke([car, ...bots.map((b) => b.car)])
+game.scene.add(smoke.object)
+
 // Race systems. The tracker and standings are created after every car is on
 // the grid, because both read the cars' positions when they are built.
 const collision = new TrackCollision(car, track.data)
@@ -141,6 +164,8 @@ const race = new RaceController({
       bot.driver.reset()
     }
     standings.reset() // after every car is back on the grid
+    skidMarks.clear()
+    smoke.clear()
   },
 })
 
@@ -189,12 +214,15 @@ carCollision.onImpact = (speed, a, b) => {
 }
 
 // Once per display frame: place every car between its last two physics steps,
-// move the camera to follow the player, keep the sun's shadow box over the
+// update the tyre marks, move the camera to follow the player, update the smoke
+// (it reads the camera's field of view), keep the sun's shadow box over the
 // player, then refresh the HUD, minimap and audio.
 game.addRenderHook((alpha, frameDt) => {
   car.interpolate(alpha)
   for (const bot of bots) bot.car.interpolate(alpha)
+  skidMarks.update() // after every car is interpolated: the marks follow the visual positions
   rig.update(frameDt)
+  smoke.update(frameDt, game.camera, game.renderer.domElement.height)
   sun.position.copy(car.object.position).add(SUN_OFFSET)
   sun.target.position.copy(car.object.position)
 
@@ -235,14 +263,72 @@ game.addRenderHook((alpha, frameDt) => {
   })
 })
 
-game.start()
+// ---------------------------------------------------------------------------
+// Car models. The game only starts once they have loaded, or failed to.
+// ---------------------------------------------------------------------------
+
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error(`${what} timed out after ${ms / 1000} s`)),
+      ms,
+    )
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        window.clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
+async function loadCarModels(): Promise<void> {
+  const loader = new CarModelLoader()
+  await loader.load(MODEL_URL, (fraction) => loading.setProgress(fraction)) // downloads the file once
+  loading.setStatus('PREPARING')
+
+  const all = [
+    { car, color: PLAYER_COLOR },
+    ...bots.map((b) => ({ car: b.car, color: b.color })),
+  ]
+  for (const entry of all) {
+    // Each car gets its own copy, repainted in its own colour. The geometry is shared.
+    const model = await loader.create({ url: MODEL_URL, ...MODEL_OPTIONS, paintColor: entry.color })
+    entry.car.setModel(model)
+  }
+}
+
+let disposed = false
+
+withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car model')
+  .catch((error) => {
+    // Any failure (a missing file, a corrupt file, a slow network) leaves the box cars in place.
+    console.warn('Car model unavailable, using the built-in car instead:', error)
+  })
+  .then(async () => {
+    if (disposed) return // the module was hot-reloaded while loading
+    // Keys pressed during loading were queued by the input layer; drop them so the race doesn't start early.
+    input.consumeConfirm()
+    input.consumeReset()
+    game.renderer.compile(game.scene, game.camera) // builds the shaders now, so the first frames don't hitch
+    game.start()
+    await loading.hide()
+  })
 
 // Avoid duplicate games and listeners when Vite hot-reloads this file.
 import.meta.hot?.dispose(() => {
+  disposed = true
+  loading.dispose()
   input.dispose()
   audio.dispose()
   minimap.dispose()
   hud.dispose()
+  smoke.dispose()
+  skidMarks.dispose()
   track.dispose()
   game.dispose()
 })

@@ -77,6 +77,8 @@ export class Car implements Updatable {
   private readonly body = new THREE.Group() // rolls in corners; wheels don't
   private readonly wheels: THREE.Mesh[] = []
   private readonly frontPivots: THREE.Group[] = []
+  private readonly wheelPivots: THREE.Group[] = [] // all four, so setModel() can remove them
+  private customModel: THREE.Object3D | null = null
 
   private readonly forward = new THREE.Vector3()
   private readonly right = new THREE.Vector3()
@@ -208,6 +210,44 @@ export class Car implements Updatable {
     this.interpolate(1)
   }
 
+  /**
+   * Replaces the box-built body and wheels with a loaded model (see CarModelLoader.create).
+   * The model should face -Z, be centred on the origin and sit on the ground, which the
+   * loader already guarantees. It still rolls in corners, but its wheels don't spin or steer.
+   * Calling this again swaps in a different model.
+   */
+  setModel(model: THREE.Object3D): void {
+    if (this.customModel) {
+      // Not disposed: its geometry is shared with other cars made from the same file.
+      this.customModel.removeFromParent()
+    } else {
+      // First swap: the box car's own parts belong to this car alone, so they are freed.
+      this.disposeBoxParts()
+    }
+    model.traverse((o) => {
+      if (o instanceof THREE.Mesh) o.castShadow = true
+    })
+    this.body.add(model)
+    this.customModel = model
+  }
+
+  private disposeBoxParts(): void {
+    const parts: THREE.Object3D[] = [...this.body.children, ...this.wheelPivots] // copied first, since removal changes the lists
+    for (const part of parts) {
+      part.traverse((o) => {
+        if (!(o instanceof THREE.Mesh)) return
+        o.geometry.dispose()
+        const materials = Array.isArray(o.material) ? o.material : [o.material]
+        for (const m of materials) m.dispose()
+      })
+      part.removeFromParent()
+    }
+    // With no wheels left, animate() has nothing to spin or steer; the body roll still works.
+    this.wheels.length = 0
+    this.frontPivots.length = 0
+    this.wheelPivots.length = 0
+  }
+
   private updateAxes(): void {
     const s = Math.sin(this.heading)
     const c = Math.cos(this.heading)
@@ -277,6 +317,7 @@ export class Car implements Updatable {
       pivot.add(wheel)
       this.object.add(pivot)
       this.wheels.push(wheel)
+      this.wheelPivots.push(pivot)
       if (w.front) this.frontPivots.push(pivot)
     }
 
