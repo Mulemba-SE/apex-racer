@@ -15,6 +15,7 @@ const BINDINGS = {
   handbrake: ['Space'],
   reset: ['KeyR'],
   confirm: ['Enter', 'NumpadEnter'], // new: starts the race from the menu
+  camera: ['KeyC'], // cycles the camera view
 } as const
 
 const BOUND_CODES = new Set<string>(Object.values(BINDINGS).flat())
@@ -40,6 +41,7 @@ export class Input {
   private readonly keys = new Set<string>()
   private resetQueued = false
   private confirmQueued = false // new
+  private cameraQueued = false
 
   constructor() {
     window.addEventListener('keydown', this.onKeyDown)
@@ -77,6 +79,13 @@ export class Input {
     return queued
   }
 
+  /** True once per press of the camera key, then false until pressed again. Works while locked. */
+  consumeCamera(): boolean {
+    const queued = this.cameraQueued
+    this.cameraQueued = false
+    return queued
+  }
+
   dispose(): void {
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
@@ -94,6 +103,7 @@ export class Input {
     if (e.repeat) return
     if (matches(BINDINGS.reset, e.code)) this.resetQueued = true
     if (matches(BINDINGS.confirm, e.code)) this.confirmQueued = true // new
+    if (matches(BINDINGS.camera, e.code)) this.cameraQueued = true
   }
 
   private onKeyUp = (e: KeyboardEvent): void => {

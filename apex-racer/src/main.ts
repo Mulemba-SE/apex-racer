@@ -19,6 +19,7 @@ import { TrackCollision } from '@/systems/TrackCollision'
 import { Hud } from '@/ui/Hud'
 import { LoadingScreen } from '@/ui/LoadingScreen'
 import { Minimap, type MinimapDot } from '@/ui/Minimap'
+import { ViewLabel } from '@/ui/ViewLabel'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
 
@@ -37,10 +38,8 @@ const loading = new LoadingScreen()
 
 const game = new Game(document.getElementById('app')!)
 
-// A larger near plane gives the depth buffer more precision, which stops the
-// road and kerbs flickering against the ground at a distance.
-game.camera.near = 0.3
-game.camera.updateProjectionMatrix()
+// The near plane is set by CameraRig for each view: large for the chase views, where it stops
+// the road and kerbs flickering at a distance, and small for the first-person views.
 
 // Sky and fog. The fog hides the edge of the ground.
 const SKY = 0x87b8e8
@@ -197,6 +196,8 @@ game.add(standings)
 const hudContainer = document.getElementById('hud')!
 const hud = new Hud(hudContainer)
 const minimap = new Minimap(hudContainer, track.data)
+const viewLabel = new ViewLabel(hudContainer)
+viewLabel.set(rig.mode)
 const audio = new AudioEngine()
 
 // One reusable dot per AI car, so the render hook creates no garbage.
@@ -221,6 +222,7 @@ game.addRenderHook((alpha, frameDt) => {
   car.interpolate(alpha)
   for (const bot of bots) bot.car.interpolate(alpha)
   skidMarks.update() // after every car is interpolated: the marks follow the visual positions
+  if (input.consumeCamera()) viewLabel.set(rig.cycle()) // before the update, so the blend starts this frame
   rig.update(frameDt)
   smoke.update(frameDt, game.camera, game.renderer.domElement.height)
   sun.position.copy(car.object.position).add(SUN_OFFSET)
@@ -314,6 +316,7 @@ withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car model')
     // Keys pressed during loading were queued by the input layer; drop them so the race doesn't start early.
     input.consumeConfirm()
     input.consumeReset()
+    input.consumeCamera()
     game.renderer.compile(game.scene, game.camera) // builds the shaders now, so the first frames don't hitch
     game.start()
     await loading.hide()
@@ -326,6 +329,7 @@ import.meta.hot?.dispose(() => {
   input.dispose()
   audio.dispose()
   minimap.dispose()
+  viewLabel.dispose()
   hud.dispose()
   smoke.dispose()
   skidMarks.dispose()
