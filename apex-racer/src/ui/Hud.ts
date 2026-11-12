@@ -11,6 +11,8 @@ export interface HudData {
   raceTime: number // seconds
   speedKmh: number
   speedFraction: number // 0..1 of the car's top speed
+  position?: number // 1 = leading; leave out (or 0) to show a dash
+  racers?: number // number of cars in the race
 }
 
 export function formatTime(seconds: number | null): string {
@@ -19,6 +21,22 @@ export function formatTime(seconds: number | null): string {
   const minutes = Math.floor(ms / 60000)
   const rest = (ms % 60000) / 1000
   return `${minutes}:${rest.toFixed(3).padStart(6, '0')}`
+}
+
+/** 1 -> "1st", 2 -> "2nd", 11 -> "11th", 22 -> "22nd". */
+export function ordinal(n: number): string {
+  const lastTwo = n % 100
+  if (lastTwo >= 11 && lastTwo <= 13) return `${n}th`
+  switch (n % 10) {
+    case 1:
+      return `${n}st`
+    case 2:
+      return `${n}nd`
+    case 3:
+      return `${n}rd`
+    default:
+      return `${n}th`
+  }
 }
 
 const CSS = `
@@ -35,6 +53,7 @@ const CSS = `
 .hud-row { display: flex; justify-content: space-between; align-items: baseline; gap: 18px; line-height: 1.55; }
 .hud-label { font-size: 12px; letter-spacing: 0.1em; opacity: 0.65; }
 .hud-value { font: 600 18px ui-monospace, monospace; }
+.hud-pos .hud-value { color: #ffd60a; }
 .hud-best .hud-value { color: #c4a3ff; }
 .hud-speed { right: 12px; bottom: 12px; min-width: 190px; text-align: right; }
 .hud-speed-num { font: 800 58px/1 system-ui; }
@@ -80,6 +99,7 @@ export class Hud {
   private readonly root: HTMLDivElement
   private readonly style: HTMLStyleElement
 
+  private readonly posValue: HTMLElement
   private readonly lapValue: HTMLElement
   private readonly timeValue: HTMLElement
   private readonly lastValue: HTMLElement
@@ -105,6 +125,7 @@ export class Hud {
 
     // Lap panel, top right.
     const lapPanel = el('div', 'hud-panel hud-lap', this.root)
+    this.posValue = addRow(lapPanel, 'POS', 'hud-pos')
     this.lapValue = addRow(lapPanel, 'LAP')
     this.timeValue = addRow(lapPanel, 'TIME')
     this.lastValue = addRow(lapPanel, 'LAST')
@@ -130,6 +151,10 @@ export class Hud {
 
   /** Call once per display frame with the current game values. */
   update(d: HudData): void {
+    const position = d.position ?? 0
+    const racers = d.racers ?? 0
+    setText(this.posValue, position > 0 ? `P${position} / ${racers}` : '-')
+
     const total = d.totalLaps > 0 ? ` / ${d.totalLaps}` : ''
     setText(this.lapValue, d.state === 'menu' ? `-${total}` : `${d.lap}${total}`)
     setText(this.timeValue, formatTime(d.lapTime))
@@ -154,12 +179,14 @@ export class Hud {
       case 'racing':
         title = d.countdownText
         break
-      case 'finished':
-        title = 'FINISH'
+      case 'finished': {
+        title = position === 1 ? 'YOU WIN!' : 'FINISH'
+        const place = position > 0 ? `${ordinal(position)} of ${racers}   ` : ''
         sub =
-          `Race ${formatTime(d.raceTime)}   Best lap ${formatTime(d.bestLap)}\n` +
+          `${place}Race ${formatTime(d.raceTime)}   Best lap ${formatTime(d.bestLap)}\n` +
           'Press ENTER to race again'
         break
+      }
     }
     setText(this.sub, sub)
     if (title !== this.lastTitle) {

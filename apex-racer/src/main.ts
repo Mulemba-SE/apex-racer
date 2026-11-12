@@ -9,11 +9,12 @@ import { Track } from '@/entities/Track'
 import { TrackData, CIRCUIT_ONE, type Pose } from '@/entities/TrackData'
 import { AIDriver, type AIOptions } from '@/systems/AIDriver'
 import { CameraRig } from '@/systems/CameraRig'
+import { CarCollision } from '@/systems/CarCollision'
 import { LapTracker } from '@/systems/LapTracker'
+import { Standings } from '@/systems/Standings'
 import { TrackCollision } from '@/systems/TrackCollision'
 import { Hud } from '@/ui/Hud'
-import { Minimap } from '@/ui/Minimap'
-import { CarCollision } from '@/systems/CarCollision'
+import { Minimap, type MinimapDot } from '@/ui/Minimap'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
 
@@ -114,16 +115,19 @@ const bots = BOT_SETUPS.map(({ slot, color, options }) => {
   game.scene.add(botCar.object)
   return {
     car: botCar,
+    color,
     driver: new AIDriver(botCar, controls, track.data, options),
     collision: new TrackCollision(botCar, track.data),
     grid: pose,
   }
 })
 
-// Race systems. The tracker is created after the car is on the grid, because
-// it reads the car's position when it is built.
+// Race systems. The tracker and standings are created after every car is on
+// the grid, because both read the cars' positions when they are built.
 const collision = new TrackCollision(car, track.data)
+const carCollision = new CarCollision([car, ...bots.map((b) => b.car)])
 const tracker = new LapTracker(car, track.data, TOTAL_LAPS)
+const standings = new Standings([car, ...bots.map((b) => b.car)], track.data, TOTAL_LAPS)
 const race = new RaceController({
   input,
   car,
@@ -136,22 +140,23 @@ const race = new RaceController({
       bot.car.reset(bot.grid.x, bot.grid.z, bot.grid.heading)
       bot.driver.reset()
     }
+    standings.reset() // after every car is back on the grid
   },
 })
 
-// The AI drives from GO onwards, and keeps racing after you finish.
+// The AI drives, and positions are tracked, from GO onwards. Both carry on
+// after you finish, so the AI cars can still earn their places.
 race.onStateChange = (state) => {
-  for (const bot of bots) bot.driver.enabled = state === 'racing' || state === 'finished'
+  const running = state === 'racing' || state === 'finished'
+  for (const bot of bots) bot.driver.enabled = running
+  standings.active = running
 }
-
-// Cars collide with each other. It sees every car, including the player's.
-const carCollision = new CarCollision([car, ...bots.map((b) => b.car)])
 
 // Fixed-step order matters:
 // the input is sampled, the race controller applies locks and brakes, the AI
 // drivers press their pedals, every car moves, cars push each other apart, each
 // wall collision then corrects its own car (so the walls have the last word),
-// and the tracker reads the player's final position.
+// and the tracker and standings read the final positions.
 game.add(input)
 game.add(race)
 for (const bot of bots) game.add(bot.driver)
@@ -161,6 +166,7 @@ game.add(carCollision)
 game.add(collision)
 for (const bot of bots) game.add(bot.collision)
 game.add(tracker)
+game.add(standings)
 
 // UI and audio.
 const hudContainer = document.getElementById('hud')!
@@ -168,14 +174,16 @@ const hud = new Hud(hudContainer)
 const minimap = new Minimap(hudContainer, track.data)
 const audio = new AudioEngine()
 
+// One reusable dot per AI car, so the render hook creates no garbage.
+const dots: MinimapDot[] = bots.map((b) => ({ x: 0, z: 0, color: b.color }))
+
 race.onCountdownTick = (value) => audio.countdownTick(value)
 race.onLap = (result) => {
   hud.showLapToast(result.lap, result.time, result.isBest)
   audio.lapChime(result.isBest)
 }
 race.onFinish = () => audio.finish()
-collision.onImpact = (speed) => audio.impact(speed) // only the player's crashes are audible
-
+collision.onImpact = (speed) => audio.impact(speed) // the player's wall crashes
 carCollision.onImpact = (speed, a, b) => {
   if (a === car || b === car) audio.impact(speed) // only crashes involving the player are audible
 }
@@ -203,9 +211,16 @@ game.addRenderHook((alpha, frameDt) => {
     raceTime: tracker.raceTime,
     speedKmh: car.speedKmh,
     speedFraction,
+    position: standings.positionOf(car),
+    racers: standings.count,
   })
 
-  minimap.update(car.object.position.x, car.object.position.z, car.object.rotation.y)
+  bots.forEach((bot, i) => {
+    const dot = dots[i]!
+    dot.x = bot.car.object.position.x
+    dot.z = bot.car.object.position.z
+  })
+  minimap.update(car.object.position.x, car.object.position.z, car.object.rotation.y, dots)
 
   // Sideways speed in m/s: the part of the velocity along the car's right-hand axis.
   const sin = Math.sin(car.heading)

@@ -2,6 +2,17 @@ import type { TrackData } from '@/entities/TrackData'
 
 const PADDING = 14 // pixels between the track and the edge of the map
 
+/** Another car to show on the map: a world position and the car's paint colour (0xRRGGBB). */
+export interface MinimapDot {
+  x: number
+  z: number
+  color: number
+}
+
+function cssColor(color: number): string {
+  return `#${color.toString(16).padStart(6, '0')}`
+}
+
 export class Minimap {
   private readonly canvas: HTMLCanvasElement
   private readonly ctx: CanvasRenderingContext2D
@@ -57,13 +68,19 @@ export class Minimap {
     this.drawBase(track)
   }
 
-  /** Call once per display frame with the car's position and heading. */
-  update(x: number, z: number, heading: number): void {
+  /**
+   * Call once per display frame with the player's position and heading, plus
+   * any other cars to show as dots.
+   */
+  update(x: number, z: number, heading: number, others: readonly MinimapDot[] = []): void {
     const px = x * this.scale + this.offsetX
     const py = z * this.scale + this.offsetY
 
-    // Skip the redraw when nothing would visibly change.
-    const key = `${Math.round(px * 2)},${Math.round(py * 2)},${Math.round(heading * 20)}`
+    // Skip the redraw when nothing would visibly change, about half a pixel for any car.
+    let key = `${Math.round(px * 2)},${Math.round(py * 2)},${Math.round(heading * 20)}`
+    for (const o of others) {
+      key += `|${Math.round((o.x * this.scale + this.offsetX) * 2)},${Math.round((o.z * this.scale + this.offsetY) * 2)}`
+    }
     if (key === this.lastKey) return
     this.lastKey = key
 
@@ -73,6 +90,18 @@ export class Minimap {
     ctx.drawImage(this.base, 0, 0)
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+
+    // The other cars first, so the player's arrow is always drawn on top.
+    for (const o of others) {
+      ctx.beginPath()
+      ctx.arc(o.x * this.scale + this.offsetX, o.z * this.scale + this.offsetY, 3.5, 0, Math.PI * 2)
+      ctx.fillStyle = cssColor(o.color)
+      ctx.fill()
+      ctx.lineWidth = 1.5
+      ctx.strokeStyle = '#ffffff'
+      ctx.stroke()
+    }
+
     ctx.save()
     ctx.translate(px, py)
     ctx.rotate(-heading) // map x = world x and map y = world z, so a left turn is a negative rotation
