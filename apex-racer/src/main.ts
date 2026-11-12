@@ -13,6 +13,7 @@ import { LapTracker } from '@/systems/LapTracker'
 import { TrackCollision } from '@/systems/TrackCollision'
 import { Hud } from '@/ui/Hud'
 import { Minimap } from '@/ui/Minimap'
+import { CarCollision } from '@/systems/CarCollision'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
 
@@ -143,15 +144,20 @@ race.onStateChange = (state) => {
   for (const bot of bots) bot.driver.enabled = state === 'racing' || state === 'finished'
 }
 
+// Cars collide with each other. It sees every car, including the player's.
+const carCollision = new CarCollision([car, ...bots.map((b) => b.car)])
+
 // Fixed-step order matters:
 // the input is sampled, the race controller applies locks and brakes, the AI
-// drivers press their pedals, every car moves, each collision corrects its own
-// car, and the tracker reads the player's final position.
+// drivers press their pedals, every car moves, cars push each other apart, each
+// wall collision then corrects its own car (so the walls have the last word),
+// and the tracker reads the player's final position.
 game.add(input)
 game.add(race)
 for (const bot of bots) game.add(bot.driver)
 game.add(car)
 for (const bot of bots) game.add(bot.car)
+game.add(carCollision)
 game.add(collision)
 for (const bot of bots) game.add(bot.collision)
 game.add(tracker)
@@ -169,6 +175,10 @@ race.onLap = (result) => {
 }
 race.onFinish = () => audio.finish()
 collision.onImpact = (speed) => audio.impact(speed) // only the player's crashes are audible
+
+carCollision.onImpact = (speed, a, b) => {
+  if (a === car || b === car) audio.impact(speed) // only crashes involving the player are audible
+}
 
 // Once per display frame: place every car between its last two physics steps,
 // move the camera to follow the player, keep the sun's shadow box over the
