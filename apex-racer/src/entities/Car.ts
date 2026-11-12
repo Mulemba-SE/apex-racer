@@ -1,7 +1,6 @@
 import * as THREE from 'three'
 import type { Updatable } from '@/core/Game'
 import type { Controls } from '@/core/Input'
-import { CAR_WHEEL_RIG_KEY, type CarWheelRigMetadata } from '@/entities/CarModel'
 
 export interface CarConfig {
   maxSpeed: number // m/s, forward (55 is about 200 km/h)
@@ -60,29 +59,6 @@ function moveToward(current: number, target: number, maxDelta: number): number {
   return current + Math.sign(target - current) * maxDelta
 }
 
-interface WheelAnimation {
-  object: THREE.Object3D
-  axis: THREE.Vector3
-}
-
-function isVectorTuple(value: unknown): value is readonly [number, number, number] {
-  return (
-    Array.isArray(value) &&
-    value.length === 3 &&
-    value.every((component) => typeof component === 'number' && Number.isFinite(component))
-  )
-}
-
-function isWheelRigMetadata(value: unknown): value is CarWheelRigMetadata {
-  if (typeof value !== 'object' || value === null) return false
-  const metadata = value as Partial<CarWheelRigMetadata>
-  return (
-    typeof metadata.front === 'boolean' &&
-    isVectorTuple(metadata.hub) &&
-    isVectorTuple(metadata.axleAxis)
-  )
-}
-
 export class Car implements Updatable {
   /** Add this to the scene. Its transform is the car's visual transform. */
   readonly object = new THREE.Group()
@@ -99,7 +75,7 @@ export class Car implements Updatable {
 
   private readonly controls: Controls
   private readonly body = new THREE.Group() // rolls in corners; wheels don't
-  private readonly wheels: WheelAnimation[] = []
+  private readonly wheels: THREE.Mesh[] = []
   private readonly frontPivots: THREE.Group[] = []
   private readonly wheelPivots: THREE.Group[] = [] // all four, so setModel() can remove them
   private customModel: THREE.Object3D | null = null
@@ -237,15 +213,11 @@ export class Car implements Updatable {
   /**
    * Replaces the box-built body and wheels with a loaded model (see CarModelLoader.create).
    * The model should face -Z, be centred on the origin and sit on the ground, which the
-   * loader already guarantees. Tagged wheel assemblies are attached to the animation pivots.
+   * loader already guarantees. It still rolls in corners, but its wheels don't spin or steer.
    * Calling this again swaps in a different model.
    */
   setModel(model: THREE.Object3D): void {
-    if (this.customModel === model) return
-
     if (this.customModel) {
-      this.wheels.length = 0
-      this.frontPivots.length = 0
       // Not disposed: its geometry is shared with other cars made from the same file.
       this.customModel.removeFromParent()
     } else {
@@ -257,43 +229,6 @@ export class Car implements Updatable {
     })
     this.body.add(model)
     this.customModel = model
-    this.registerModelWheels(model)
-  }
-
-  private registerModelWheels(model: THREE.Object3D): void {
-    const assemblies: Array<{ object: THREE.Object3D; metadata: CarWheelRigMetadata }> = []
-    model.traverse((object) => {
-      const metadata: unknown = object.userData[CAR_WHEEL_RIG_KEY]
-      if (isWheelRigMetadata(metadata)) assemblies.push({ object, metadata })
-    })
-
-    model.updateMatrixWorld(true)
-    for (const { object, metadata } of assemblies) {
-      const spinPivot = new THREE.Group()
-      if (metadata.front) {
-        const steeringPivot = new THREE.Group()
-        steeringPivot.position.fromArray(metadata.hub)
-        steeringPivot.add(spinPivot)
-        model.add(steeringPivot)
-        this.frontPivots.push(steeringPivot)
-      } else {
-        spinPivot.position.fromArray(metadata.hub)
-        model.add(spinPivot)
-      }
-
-      model.updateMatrixWorld(true)
-      const localMatrix = spinPivot.matrixWorld.clone().invert().multiply(object.matrixWorld)
-      object.removeFromParent()
-      spinPivot.add(object)
-      object.matrixAutoUpdate = false
-      object.matrix.copy(localMatrix)
-      object.matrixWorldNeedsUpdate = true
-      model.updateMatrixWorld(true)
-      this.wheels.push({
-        object: spinPivot,
-        axis: new THREE.Vector3(...metadata.axleAxis).normalize(),
-      })
-    }
   }
 
   private disposeBoxParts(): void {
@@ -323,7 +258,7 @@ export class Car implements Updatable {
   /** Visual-only motion: wheel spin, front-wheel steering, body roll. */
   private animate(dt: number, forwardSpeed: number): void {
     const spin = (forwardSpeed * dt) / WHEEL_RADIUS
-    for (const wheel of this.wheels) wheel.object.rotateOnAxis(wheel.axis, -spin)
+    for (const wheel of this.wheels) wheel.rotation.x -= spin
     for (const pivot of this.frontPivots) {
       pivot.rotation.y = -this.steerValue * MAX_WHEEL_LOCK
     }
@@ -381,10 +316,7 @@ export class Car implements Updatable {
       wheel.add(new THREE.Mesh(hubGeo, rim))
       pivot.add(wheel)
       this.object.add(pivot)
-      this.wheels.push({
-        object: wheel,
-        axis: new THREE.Vector3(1, 0, 0),
-      })
+      this.wheels.push(wheel)
       this.wheelPivots.push(pivot)
       if (w.front) this.frontPivots.push(pivot)
     }
