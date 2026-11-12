@@ -28,6 +28,12 @@ const MODEL_URL = `${import.meta.env.BASE_URL}models/car.glb`
 const MODEL_TIMEOUT_MS = 15000
 const MODEL_OPTIONS: Omit<CarModelOptions, 'url' | 'paintColor'> = {
   yaw: Math.PI, // 0 if the car drives backwards, +-Math.PI / 2 if it points sideways
+  wheelAssemblies: [
+    { nodeName: 'node_id843', front: true },
+    { nodeName: 'node_id1007', front: true },
+    { nodeName: 'node_id1130', front: false },
+    { nodeName: 'node_id1249', front: false },
+  ],
   // paintPattern: /body|paint/i, // which material names count as paint; see the console message
 }
 const PLAYER_COLOR = 0xd62828
