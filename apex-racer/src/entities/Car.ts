@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { wheelsOf, type ModelWheel } from '@/entities/CarModel'
 import type { Updatable } from '@/core/Game'
 import type { Controls } from '@/core/Input'
 
@@ -79,6 +80,7 @@ export class Car implements Updatable {
   private readonly frontPivots: THREE.Group[] = []
   private readonly wheelPivots: THREE.Group[] = [] // all four, so setModel() can remove them
   private customModel: THREE.Object3D | null = null
+  private modelWheels: readonly ModelWheel[] = [] // the loaded model's wheels, if it has any
 
   private readonly forward = new THREE.Vector3()
   private readonly right = new THREE.Vector3()
@@ -213,7 +215,8 @@ export class Car implements Updatable {
   /**
    * Replaces the box-built body and wheels with a loaded model (see CarModelLoader.create).
    * The model should face -Z, be centred on the origin and sit on the ground, which the
-   * loader already guarantees. It still rolls in corners, but its wheels don't spin or steer.
+   * loader already guarantees. It rolls in corners with the body. If the loader found the
+   * model's wheels, they spin and the front pair steers; otherwise they stay still.
    * Calling this again swaps in a different model.
    */
   setModel(model: THREE.Object3D): void {
@@ -229,6 +232,7 @@ export class Car implements Updatable {
     })
     this.body.add(model)
     this.customModel = model
+    this.modelWheels = wheelsOf(model)
   }
 
   private disposeBoxParts(): void {
@@ -242,7 +246,7 @@ export class Car implements Updatable {
       })
       part.removeFromParent()
     }
-    // With no wheels left, animate() has nothing to spin or steer; the body roll still works.
+    // With no box wheels left, animate() has nothing of theirs to spin or steer.
     this.wheels.length = 0
     this.frontPivots.length = 0
     this.wheelPivots.length = 0
@@ -261,6 +265,12 @@ export class Car implements Updatable {
     for (const wheel of this.wheels) wheel.rotation.x -= spin
     for (const pivot of this.frontPivots) {
       pivot.rotation.y = -this.steerValue * MAX_WHEEL_LOCK
+    }
+
+    // A loaded model's wheels: each has its own radius, so each spins at its own rate.
+    for (const w of this.modelWheels) {
+      w.spin.rotation.x -= (forwardSpeed * dt) / w.radius
+      if (w.front) w.steer.rotation.y = -this.steerValue * MAX_WHEEL_LOCK
     }
 
     const speedFraction = clamp(Math.abs(forwardSpeed) / this.config.maxSpeed, 0, 1)
