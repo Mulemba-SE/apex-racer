@@ -100,7 +100,7 @@ export class RaceController implements Updatable {
     }
   }
 
-  private restart(): void {
+   restart(): void {
     this.respawn() // car back on the grid first, because tracker.reset() reads its position
     this.tracker.reset()
     this.beginCountdown()

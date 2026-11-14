@@ -16,12 +16,18 @@ const BINDINGS = {
   reset: ['KeyR'],
   confirm: ['Enter', 'NumpadEnter'], // starts the race from the menu
   camera: ['KeyC'], // cycles the camera view
+  pause: ['Escape', 'KeyP'], // pauses and resumes
 } as const
 
 const BOUND_CODES = new Set<string>(Object.values(BINDINGS).flat())
 
 function matches(codes: readonly string[], code: string): boolean {
   return codes.includes(code)
+}
+
+/** True when a key press is aimed at a button, dropdown or text field, which needs its keys for itself. */
+function isInteractive(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && target.closest('button, select, input, textarea, [contenteditable]') !== null
 }
 
 export class Input {
@@ -42,6 +48,7 @@ export class Input {
   private resetQueued = false
   private confirmQueued = false
   private cameraQueued = false
+  private pauseQueued = false
 
   constructor() {
     window.addEventListener('keydown', this.onKeyDown)
@@ -86,6 +93,16 @@ export class Input {
     return queued
   }
 
+  /**
+   * True once per press of Esc or P, then false until pressed again. Works while locked.
+   * Poll this from the render hook, not the fixed step: the fixed step stops running while paused.
+   */
+  consumePause(): boolean {
+    const queued = this.pauseQueued
+    this.pauseQueued = false
+    return queued
+  }
+
   dispose(): void {
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
@@ -99,12 +116,15 @@ export class Input {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (!BOUND_CODES.has(e.code)) return
     if (e.ctrlKey || e.metaKey || e.altKey) return // leave browser shortcuts (Ctrl+R, Ctrl+C) alone
+    // A focused button or dropdown needs Space and Enter for itself. Only the pause keys get through.
+    if (isInteractive(e.target) && !matches(BINDINGS.pause, e.code)) return
     e.preventDefault() // stops Space and the arrows from scrolling or clicking things
     this.keys.add(e.code)
     if (e.repeat) return
     if (matches(BINDINGS.reset, e.code)) this.resetQueued = true
     if (matches(BINDINGS.confirm, e.code)) this.confirmQueued = true
     if (matches(BINDINGS.camera, e.code)) this.cameraQueued = true
+    if (matches(BINDINGS.pause, e.code)) this.pauseQueued = true
   }
 
   private onKeyUp = (e: KeyboardEvent): void => {

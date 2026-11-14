@@ -4,6 +4,7 @@ import { BestTimes } from '@/core/BestTimes'
 import { Game } from '@/core/Game'
 import { Input, type Controls } from '@/core/Input'
 import { RaceController } from '@/core/RaceController'
+import { Settings } from '@/core/Settings'
 import { Car } from '@/entities/Car'
 import { CarModelLoader, type CarModelOptions } from '@/entities/CarModel'
 import { Track } from '@/entities/Track'
@@ -19,6 +20,7 @@ import { TrackCollision } from '@/systems/TrackCollision'
 import { Hud } from '@/ui/Hud'
 import { LoadingScreen } from '@/ui/LoadingScreen'
 import { Minimap, type MinimapDot } from '@/ui/Minimap'
+import { PauseMenu } from '@/ui/PauseMenu'
 import { ViewLabel } from '@/ui/ViewLabel'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
@@ -36,6 +38,9 @@ const PLAYER_COLOR = 0xd62828
 // Shown immediately, and removed once the car model has loaded (or failed to).
 const loading = new LoadingScreen()
 
+// The saved graphics quality. It is applied below, once the sun and the smoke exist.
+const settings = new Settings()
+
 const game = new Game(document.getElementById('app')!)
 
 // The near plane is set by CameraRig for each view: large for the chase views, where it stops
@@ -47,12 +52,11 @@ game.scene.background = new THREE.Color(SKY)
 game.scene.fog = new THREE.Fog(SKY, 200, 1000)
 
 // Lighting. The sun follows the player's car (see the render hook below), so the
-// shadow map only has to cover the area around it.
+// shadow map only has to cover the area around it. Its resolution comes from the quality setting.
 game.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.0))
 const sun = new THREE.DirectionalLight(0xffffff, 2.2)
 const SUN_OFFSET = new THREE.Vector3(30, 50, 20)
 sun.castShadow = true
-sun.shadow.mapSize.set(2048, 2048)
 sun.shadow.camera.left = -40
 sun.shadow.camera.right = 40
 sun.shadow.camera.top = 40
@@ -108,10 +112,10 @@ car.reset(playerGrid.x, playerGrid.z, playerGrid.heading)
 game.scene.add(car.object)
 const rig = new CameraRig(game.camera, car) // after the reset, so it starts behind the car
 
-// Temporary, for tuning the camera positions. In development only, it exposes the car and the
-// camera rig to the browser console, e.g. car.viewAnchors.cockpit.position.set(0, 0.85, -0.2).
-// Delete this line once the positions are final.
-if (import.meta.env.DEV) Object.assign(window, { car, rig })
+// Temporary, for tuning the camera positions. In development only, it exposes objects to the
+// browser console, e.g. car.viewAnchors.cockpit.position.set(0, 0.85, -0.2), or game.renderer.info.memory
+// to check for leaks. Delete this line once you are done.
+if (import.meta.env.DEV) Object.assign(window, { car, rig, game, settings })
 
 // AI opponents. Each one has its own Controls object, written by its driver.
 // Drivers differ in pace and in the line they take. Keep laneOffset within
@@ -148,6 +152,15 @@ const skidMarks = new SkidMarks([car, ...bots.map((b) => b.car)])
 game.scene.add(skidMarks.object)
 const smoke = new Smoke([car, ...bots.map((b) => b.car)])
 game.scene.add(smoke.object)
+
+// Graphics quality: how sharp the picture is, how detailed the shadows are, how thick the smoke is.
+function applyQuality(): void {
+  const preset = settings.preset
+  game.setMaxPixelRatio(preset.pixelRatio)
+  game.setShadowMapSize(sun, preset.shadowMapSize)
+  smoke.density = preset.smokeDensity
+}
+applyQuality()
 
 // Race systems. The tracker and standings are created after every car is on
 // the grid, because both read the cars' positions when they are built.
@@ -205,6 +218,46 @@ const viewLabel = new ViewLabel(hudContainer)
 viewLabel.set(rig.mode)
 const audio = new AudioEngine()
 
+// ---------------------------------------------------------------------------
+// Pause. The simulation stops, the screen keeps drawing, and the menu opens.
+// ---------------------------------------------------------------------------
+
+const pauseMenu = new PauseMenu({
+  quality: settings.quality,
+  onResume: () => setPaused(false),
+  onRestart: () => {
+    setPaused(false)
+    race.restart()
+  },
+  onQuality: (quality) => settings.setQuality(quality),
+})
+
+function setPaused(paused: boolean): void {
+  if (paused === game.isPaused) return
+  game.setPaused(paused)
+  if (paused) {
+    pauseMenu.open()
+  } else {
+    pauseMenu.close()
+    // R or Enter pressed during the pause was queued, and would fire the moment the race resumes.
+    input.consumeReset()
+    input.consumeConfirm()
+  }
+}
+
+// Switching to another browser tab in the middle of a race pauses it.
+const onVisibility = (): void => {
+  const state = race.state
+  if (document.hidden && (state === 'racing' || state === 'countdown')) setPaused(true)
+}
+document.addEventListener('visibilitychange', onVisibility)
+
+// A quality change from anywhere applies at once and shows in the menu.
+const stopSettings = settings.onChange(() => {
+  applyQuality()
+  pauseMenu.setQuality(settings.quality)
+})
+
 // One reusable dot per AI car, so the render hook creates no garbage.
 const dots: MinimapDot[] = bots.map((b) => ({ x: 0, z: 0, color: b.color }))
 
@@ -219,11 +272,13 @@ carCollision.onImpact = (speed, a, b) => {
   if (a === car || b === car) audio.impact(speed) // only crashes involving the player are audible
 }
 
-// Once per display frame: place every car between its last two physics steps,
+// Once per display frame: check the pause key, place every car between its last two physics steps,
 // update the tyre marks, move the camera to follow the player, update the smoke
 // (it reads the camera's field of view), keep the sun's shadow box over the
-// player, then refresh the HUD, minimap and audio.
+// player, then refresh the HUD, minimap and audio. This keeps running while paused.
 game.addRenderHook((alpha, frameDt) => {
+  if (input.consumePause()) setPaused(!game.isPaused)
+
   car.interpolate(alpha)
   for (const bot of bots) bot.car.interpolate(alpha)
   skidMarks.update() // after every car is interpolated: the marks follow the visual positions
@@ -263,7 +318,7 @@ game.addRenderHook((alpha, frameDt) => {
   const slip = car.velocity.x * cos - car.velocity.z * sin
 
   audio.update({
-    engineOn: race.state !== 'menu',
+    engineOn: race.state !== 'menu' && !game.isPaused, // the engine, tyres and wind fade out while paused
     speedFraction,
     throttle: input.controls.throttle,
     slip,
@@ -322,6 +377,7 @@ withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car model')
     input.consumeConfirm()
     input.consumeReset()
     input.consumeCamera()
+    input.consumePause()
     game.renderer.compile(game.scene, game.camera) // builds the shaders now, so the first frames don't hitch
     game.start()
     await loading.hide()
@@ -330,6 +386,9 @@ withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car model')
 // Avoid duplicate games and listeners when Vite hot-reloads this file.
 import.meta.hot?.dispose(() => {
   disposed = true
+  document.removeEventListener('visibilitychange', onVisibility)
+  stopSettings()
+  pauseMenu.dispose()
   loading.dispose()
   input.dispose()
   audio.dispose()

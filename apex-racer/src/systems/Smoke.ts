@@ -51,6 +51,9 @@ export class Smoke {
   /** Add this to the scene. */
   readonly object: THREE.Points
 
+  /** 0 to 1: how much of the smoke and dust is made. 1 is the full effect. Safe to change at any time. */
+  density = 1
+
   private readonly cars: readonly Car[]
   private readonly max: number
 
@@ -145,6 +148,8 @@ export class Smoke {
   }
 
   private emit(dt: number): void {
+    const density = clamp(this.density, 0, 1)
+
     this.cars.forEach((car, ci) => {
       const obj = car.object
       const sin = Math.sin(obj.rotation.y)
@@ -168,13 +173,13 @@ export class Smoke {
         const wx = obj.position.x + wheel.x * cos + wheel.z * sin
         const wz = obj.position.z - wheel.x * sin + wheel.z * cos
 
-        this.accumulator[k] = this.owed(this.accumulator[k]!, SMOKE_RATE, smokeStrength, dt)
+        this.accumulator[k] = this.owed(this.accumulator[k]!, SMOKE_RATE * density, smokeStrength, dt)
         while (this.accumulator[k]! >= 1) {
           this.accumulator[k]! -= 1
           this.spawn(wx, wz, car, false, smokeStrength, Math.random() * dt)
         }
 
-        this.accumulator[k + 1] = this.owed(this.accumulator[k + 1]!, DUST_RATE, dustStrength, dt)
+        this.accumulator[k + 1] = this.owed(this.accumulator[k + 1]!, DUST_RATE * density, dustStrength, dt)
         while (this.accumulator[k + 1]! >= 1) {
           this.accumulator[k + 1]! -= 1
           this.spawn(wx, wz, car, true, dustStrength, Math.random() * dt)
