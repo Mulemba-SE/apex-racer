@@ -14,7 +14,7 @@ const BINDINGS = {
   right: ['KeyD', 'ArrowRight'],
   handbrake: ['Space'],
   reset: ['KeyR'],
-  confirm: ['Enter', 'NumpadEnter'], // new: starts the race from the menu
+  confirm: ['Enter', 'NumpadEnter'], // starts the race from the menu
   camera: ['KeyC'], // cycles the camera view
 } as const
 
@@ -33,14 +33,14 @@ export class Input {
   }
 
   /**
-   * New: while true, the car sees no input at all. Held keys are remembered, so
+   * While true, the car sees no input at all. Held keys are remembered, so
    * anything still held when the lock ends takes effect on the next step.
    */
   locked = false
 
   private readonly keys = new Set<string>()
   private resetQueued = false
-  private confirmQueued = false // new
+  private confirmQueued = false
   private cameraQueued = false
 
   constructor() {
@@ -72,7 +72,7 @@ export class Input {
     return queued
   }
 
-  /** New: true once per press of Enter, then false until pressed again. Works while locked. */
+  /** True once per press of Enter, then false until pressed again. Works while locked. */
   consumeConfirm(): boolean {
     const queued = this.confirmQueued
     this.confirmQueued = false
@@ -98,11 +98,12 @@ export class Input {
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (!BOUND_CODES.has(e.code)) return
+    if (e.ctrlKey || e.metaKey || e.altKey) return // leave browser shortcuts (Ctrl+R, Ctrl+C) alone
     e.preventDefault() // stops Space and the arrows from scrolling or clicking things
     this.keys.add(e.code)
     if (e.repeat) return
     if (matches(BINDINGS.reset, e.code)) this.resetQueued = true
-    if (matches(BINDINGS.confirm, e.code)) this.confirmQueued = true // new
+    if (matches(BINDINGS.confirm, e.code)) this.confirmQueued = true
     if (matches(BINDINGS.camera, e.code)) this.cameraQueued = true
   }
 

@@ -1,3 +1,4 @@
+
 import * as THREE from 'three'
 import type { Car, CarViewPoint } from '@/entities/Car'
 
@@ -16,27 +17,27 @@ export const CAMERA_LABELS: Record<CameraMode, string> = {
 
 /** A chase-style view: the camera trails the car and swings round behind it with a delay. */
 export interface CameraRigConfig {
-  distance: number // metres behind the car at standstill
-  extraDistance: number // additional metres pulled back at top speed
-  height: number // metres above the ground
-  lookAhead: number // metres in front of the car the camera aims at
-  lookHeight: number // height of the aim point
-  headingLag: number // 1/s, higher = camera swings behind the car faster
-  fovBase: number // degrees at standstill
-  fovMax: number // degrees at top speed
-  fovResponse: number // 1/s, how quickly the FOV follows speed
-  near: number // near plane in metres; kept large so the road and kerbs don't flicker in the distance
+  distance: number
+  extraDistance: number
+  height: number
+  lookAhead: number
+  lookHeight: number
+  headingLag: number
+  fovBase: number
+  fovMax: number
+  fovResponse: number
+  near: number
 }
 
 /** A first-person view: the camera is bolted to the car and copies its rotation, with no lag. */
 export interface FirstPersonConfig {
-  anchor: CarViewPoint // which mount on the car (see CAR_VIEW_POINTS)
-  near: number // near plane in metres; small, so the dashboard and bonnet aren't clipped
-  fovBase: number // degrees at standstill
-  fovMax: number // degrees at top speed (follows speed directly, with no smoothing)
-  steerYaw: number // radians the camera turns into the corner at full lock
-  shake: number // 1 = the standard faint shake at top speed, 0 = none
-  hide: RegExp | null // model materials to hide in this view (matched by name, see Car.setHiddenMaterials)
+  anchor: CarViewPoint
+  near: number
+  fovBase: number
+  fovMax: number
+  steerYaw: number
+  shake: number
+  hide: RegExp | null
 }
 
 export const DEFAULT_CAMERA_CONFIG: CameraRigConfig = {
@@ -64,9 +65,7 @@ export const FAR_CAMERA_CONFIG: CameraRigConfig = {
 }
 
 /**
- * Parts of the model that sit in the driver's line of sight. The wiper is a single blade on the
- * centre line, right in the middle of the windscreen. If something else blocks the cockpit view,
- * add its material name here (the names are printed to the console when the model loads).
+ * Parts of the model that sit in the driver's line of sight.
  */
 export const COCKPIT_HIDE = /^wiper$/i
 
@@ -91,9 +90,9 @@ export const FIRST_PERSON_VIEWS: Record<'hood' | 'cockpit', FirstPersonConfig> =
   },
 }
 
-const BLEND_SECONDS = 0.35 // how long a switch between views takes
-const SHAKE_ROTATION = 0.002 // radians of pitch wobble at the standard shake
-const SHAKE_LIFT = 0.003 // metres of vertical wobble at the standard shake
+const BLEND_SECONDS = 0.35
+const SHAKE_ROTATION = 0.002
+const SHAKE_LIFT = 0.003
 const UP = new THREE.Vector3(0, 1, 0)
 
 /** Exponential smoothing factor that behaves the same at any frame rate. */
@@ -120,30 +119,38 @@ interface Pose {
 }
 
 function makePose(): Pose {
-  return { position: new THREE.Vector3(), quaternion: new THREE.Quaternion(), fov: 65, near: 0.3 }
+  return {
+    position: new THREE.Vector3(),
+    quaternion: new THREE.Quaternion(),
+    fov: 65,
+    near: 0.3,
+  }
 }
 
 export class CameraRig {
   /** Settings of the 'chase' view. Edit these to tune it. */
   readonly config: CameraRigConfig
+
   /** Settings of the 'far' view. */
   readonly farConfig: CameraRigConfig
+
   /** Settings of the 'hood' and 'cockpit' views. */
   readonly firstPerson: Record<'hood' | 'cockpit', FirstPersonConfig>
 
   private readonly camera: THREE.PerspectiveCamera
   private readonly target: Car
+
   private current: CameraMode = 'chase'
-  private chaseHeading = 0 // the smoothed heading the chase views swing toward
+  private chaseHeading = 0
   private chaseFov: number
-  private time = 0 // seconds, drives the shake
+  private time = 0
 
   // A switch between views blends from where the camera was to where the new view wants it.
   // The start pose is stored relative to the car, so the blend keeps moving with the car.
-  private blend = 1 // 0..1; 1 means no blend is running
-  private readonly from = makePose() // in the car's space
-  private readonly goal = makePose() // where the current view wants the camera, in world space
-  private readonly shown = makePose() // what is actually applied to the camera
+  private blend = 1
+  private readonly from = makePose()
+  private readonly goal = makePose()
+  private readonly shown = makePose()
 
   private readonly forward = new THREE.Vector3()
   private readonly aim = new THREE.Vector3()
@@ -164,7 +171,12 @@ export class CameraRig {
     this.target = target
     this.config = { ...DEFAULT_CAMERA_CONFIG, ...config }
     this.farConfig = { ...FAR_CAMERA_CONFIG }
-    this.firstPerson = { hood: { ...FIRST_PERSON_VIEWS.hood }, cockpit: { ...FIRST_PERSON_VIEWS.cockpit } }
+
+    this.firstPerson = {
+      hood: { ...FIRST_PERSON_VIEWS.hood },
+      cockpit: { ...FIRST_PERSON_VIEWS.cockpit },
+    }
+
     this.chaseFov = this.config.fovBase
     this.snap()
   }
@@ -173,35 +185,57 @@ export class CameraRig {
     return this.current
   }
 
-  /** Switches to a view, blending over a third of a second. Pass `instant` to cut straight to it. */
+  /** Switches to a view, blending over a third of a second. */
   setMode(mode: CameraMode, instant = false): void {
     if (mode === this.current) return
 
     // Remember where the camera is now, in the car's space, before the view changes.
     const car = this.target.object
+
     car.updateMatrixWorld(true)
+
     this.from.position.copy(this.camera.position)
     car.worldToLocal(this.from.position)
-    this.from.quaternion.copy(car.quaternion).invert().multiply(this.camera.quaternion)
+
+    this.from.quaternion
+      .copy(car.quaternion)
+      .invert()
+      .multiply(this.camera.quaternion)
+
     this.from.fov = this.camera.fov
     this.from.near = this.camera.near
 
     this.current = mode
-    this.target.setHiddenMaterials(isFirstPerson(mode) ? this.firstPerson[mode].hide : null)
+
+    this.target.setHiddenMaterials(
+      isFirstPerson(mode) ? this.firstPerson[mode].hide : null,
+    )
+
     this.blend = instant ? 1 : 0
+
+    if (instant) {
+      this.computeGoal()
+      this.blendAndApply(0)
+    }
   }
 
   /** Moves on to the next view in CAMERA_MODES and returns it. */
   cycle(): CameraMode {
-    const next = CAMERA_MODES[(CAMERA_MODES.indexOf(this.current) + 1) % CAMERA_MODES.length]!
+    const next =
+      CAMERA_MODES[(CAMERA_MODES.indexOf(this.current) + 1) % CAMERA_MODES.length]!
+
     this.setMode(next)
+
     return next
   }
 
   /** Call once per display frame, after the car's visual transform is updated. */
   update(frameDt: number): void {
     this.time += frameDt
-    this.target.object.updateMatrixWorld(true) // the anchors read this, and the renderer hasn't done it yet
+
+    // Update the car and all camera anchors before reading their world transforms.
+    this.target.object.updateMatrixWorld(true)
+
     this.followChase(frameDt)
     this.computeGoal()
     this.blendAndApply(frameDt)
@@ -210,10 +244,13 @@ export class CameraRig {
   /** Jump straight to the ideal pose with no smoothing. Use after a reset. */
   snap(): void {
     const cfg = this.chaseConfig()
+
     this.chaseHeading = this.target.object.rotation.y
     this.chaseFov = cfg.fovBase
     this.blend = 1
+
     this.target.object.updateMatrixWorld(true)
+
     this.computeGoal()
     this.blendAndApply(0)
   }
@@ -225,6 +262,7 @@ export class CameraRig {
   private speedFraction(): number {
     const car = this.target
     const fraction = car.velocity.length() / car.config.maxSpeed
+
     return Math.min(1, Math.max(0, fraction))
   }
 
@@ -237,17 +275,28 @@ export class CameraRig {
 
     // Swing the chase heading toward the car's heading.
     const carHeading = this.target.object.rotation.y
-    this.chaseHeading += angleDiff(carHeading, this.chaseHeading) * damp(cfg.headingLag, frameDt)
+
+    this.chaseHeading +=
+      angleDiff(carHeading, this.chaseHeading) *
+      damp(cfg.headingLag, frameDt)
 
     // The field of view widens with speed.
-    const targetFov = cfg.fovBase + (cfg.fovMax - cfg.fovBase) * this.speedFraction()
-    this.chaseFov += (targetFov - this.chaseFov) * damp(cfg.fovResponse, frameDt)
+    const targetFov =
+      cfg.fovBase + (cfg.fovMax - cfg.fovBase) * this.speedFraction()
+
+    this.chaseFov +=
+      (targetFov - this.chaseFov) *
+      damp(cfg.fovResponse, frameDt)
   }
 
   private computeGoal(): void {
     const mode = this.current
-    if (isFirstPerson(mode)) this.firstPersonPose(this.firstPerson[mode])
-    else this.chasePose(this.chaseConfig())
+
+    if (isFirstPerson(mode)) {
+      this.firstPersonPose(this.firstPerson[mode])
+    } else {
+      this.chasePose(this.chaseConfig())
+    }
   }
 
   /** Behind the car and aimed just ahead of it, lagging so drifts stay readable. */
@@ -256,12 +305,25 @@ export class CameraRig {
     const carPos = this.target.object.position
 
     // Unit vector the car "should" be facing, from the smoothed heading.
-    this.forward.set(-Math.sin(this.chaseHeading), 0, -Math.cos(this.chaseHeading))
+    this.forward.set(
+      -Math.sin(this.chaseHeading),
+      0,
+      -Math.cos(this.chaseHeading),
+    )
 
-    const distance = cfg.distance + cfg.extraDistance * this.speedFraction()
-    goal.position.copy(carPos).addScaledVector(this.forward, -distance).setY(cfg.height)
+    const distance =
+      cfg.distance + cfg.extraDistance * this.speedFraction()
 
-    this.aim.copy(carPos).addScaledVector(this.forward, cfg.lookAhead).setY(cfg.lookHeight)
+    goal.position
+      .copy(carPos)
+      .addScaledVector(this.forward, -distance)
+      .setY(cfg.height)
+
+    this.aim
+      .copy(carPos)
+      .addScaledVector(this.forward, cfg.lookAhead)
+      .setY(cfg.lookHeight)
+
     this.matrix.lookAt(goal.position, this.aim, UP)
     goal.quaternion.setFromRotationMatrix(this.matrix)
 
@@ -275,31 +337,64 @@ export class CameraRig {
     const car = this.target
     const speed = this.speedFraction()
 
-    car.viewAnchors[cfg.anchor].matrixWorld.decompose(goal.position, goal.quaternion, this.scale)
+    const anchor = car.viewAnchors[cfg.anchor]
 
-    // Look a little into the corner. Steering right is positive, and a positive turn about +Y is left.
+    // Ensure the anchor and its parents have current world transforms.
+    anchor.updateWorldMatrix(true, false)
+
+    anchor.matrixWorld.decompose(
+      goal.position,
+      goal.quaternion,
+      this.scale,
+    )
+
+    // Look a little into the corner.
     this.turn.setFromAxisAngle(UP, -car.steering * cfg.steerYaw)
     goal.quaternion.multiply(this.turn)
 
-    // A faint wobble that grows with the square of speed, so it is absent when slow.
+    // A faint wobble that grows with the square of speed.
     const amount = cfg.shake * speed * speed
+
     if (amount > 0) {
       const t = this.time
-      const pitch = (Math.sin(t * 31.7) + 0.6 * Math.sin(t * 47.3 + 1.3)) * SHAKE_ROTATION * amount
-      const roll = Math.sin(t * 27.1 + 0.7) * SHAKE_ROTATION * 0.7 * amount
-      const lift = (Math.sin(t * 53.9 + 2.1) + 0.5 * Math.sin(t * 19.3)) * SHAKE_LIFT * amount
+
+      const pitch =
+        (Math.sin(t * 31.7) +
+          0.6 * Math.sin(t * 47.3 + 1.3)) *
+        SHAKE_ROTATION *
+        amount
+
+      const roll =
+        Math.sin(t * 27.1 + 0.7) *
+        SHAKE_ROTATION *
+        0.7 *
+        amount
+
+      const lift =
+        (Math.sin(t * 53.9 + 2.1) +
+          0.5 * Math.sin(t * 19.3)) *
+        SHAKE_LIFT *
+        amount
+
       this.euler.set(pitch, 0, roll)
       this.turn.setFromEuler(this.euler)
+
       goal.quaternion.multiply(this.turn)
-      this.offset.set(0, lift, 0).applyQuaternion(goal.quaternion)
+
+      this.offset
+        .set(0, lift, 0)
+        .applyQuaternion(goal.quaternion)
+
       goal.position.add(this.offset)
     }
 
-    goal.fov = cfg.fovBase + (cfg.fovMax - cfg.fovBase) * speed
+    goal.fov =
+      cfg.fovBase + (cfg.fovMax - cfg.fovBase) * speed
+
     goal.near = cfg.near
   }
 
-  /** Mixes the old pose into the goal while a blend is running, then puts the result on the camera. */
+  /** Mixes the old pose into the goal while a blend is running. */
   private blendAndApply(frameDt: number): void {
     const goal = this.goal
     const shown = this.shown
@@ -310,34 +405,70 @@ export class CameraRig {
       shown.fov = goal.fov
       shown.near = goal.near
     } else {
-      this.blend = Math.min(1, this.blend + frameDt / BLEND_SECONDS)
+      this.blend = Math.min(
+        1,
+        this.blend + frameDt / BLEND_SECONDS,
+      )
+
       const e = this.blend * this.blend * (3 - 2 * this.blend)
 
-      // Bring the start pose back out of the car's space, so it has moved along with the car.
+      // Bring the start pose back out of the car's space,
+      // so it has moved along with the car.
       const car = this.target.object
+
       this.fromPosition.copy(this.from.position)
       car.localToWorld(this.fromPosition)
-      this.fromQuaternion.copy(car.quaternion).multiply(this.from.quaternion)
 
-      shown.position.lerpVectors(this.fromPosition, goal.position, e)
-      shown.quaternion.slerpQuaternions(this.fromQuaternion, goal.quaternion, e)
-      shown.fov = this.from.fov + (goal.fov - this.from.fov) * e
-      shown.near = Math.min(this.from.near, goal.near) // the smaller one, so nothing is clipped on the way
+      this.fromQuaternion
+        .copy(car.quaternion)
+        .multiply(this.from.quaternion)
+
+      shown.position.lerpVectors(
+        this.fromPosition,
+        goal.position,
+        e,
+      )
+
+      shown.quaternion.slerpQuaternions(
+        this.fromQuaternion,
+        goal.quaternion,
+        e,
+      )
+
+      shown.fov = THREE.MathUtils.lerp(
+        this.from.fov,
+        goal.fov,
+        e,
+      )
+
+      // Smoothly transition the near clipping plane between camera views.
+      shown.near = THREE.MathUtils.lerp(
+        this.from.near,
+        goal.near,
+        e,
+      )
     }
 
-    // Only touch the projection when it changes.
+    // Apply the resulting pose to the camera.
     const camera = this.camera
+
     camera.position.copy(shown.position)
     camera.quaternion.copy(shown.quaternion)
+
     let projectionChanged = false
+
     if (Math.abs(camera.fov - shown.fov) > 0.01) {
       camera.fov = shown.fov
       projectionChanged = true
     }
-    if (camera.near !== shown.near) {
+
+    if (Math.abs(camera.near - shown.near) > 0.0001) {
       camera.near = shown.near
       projectionChanged = true
     }
-    if (projectionChanged) camera.updateProjectionMatrix()
+
+    if (projectionChanged) {
+      camera.updateProjectionMatrix()
+    }
   }
 }

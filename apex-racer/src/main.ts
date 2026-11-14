@@ -108,6 +108,11 @@ car.reset(playerGrid.x, playerGrid.z, playerGrid.heading)
 game.scene.add(car.object)
 const rig = new CameraRig(game.camera, car) // after the reset, so it starts behind the car
 
+// Temporary, for tuning the camera positions. In development only, it exposes the car and the
+// camera rig to the browser console, e.g. car.viewAnchors.cockpit.position.set(0, 0.85, -0.2).
+// Delete this line once the positions are final.
+if (import.meta.env.DEV) Object.assign(window, { car, rig })
+
 // AI opponents. Each one has its own Controls object, written by its driver.
 // Drivers differ in pace and in the line they take. Keep laneOffset within
 // about +-4 m so they stay on the asphalt.

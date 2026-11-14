@@ -115,8 +115,8 @@ export class Car implements Updatable {
     cockpit: new THREE.Object3D(),
   }
 
-  // Stores original visibility so camera changes can restore materials.
-  private readonly hiddenMaterials = new Map<THREE.Material, boolean>()
+  // Stores original visibility of meshes hidden by camera views.
+  private readonly hiddenMeshes = new Map<THREE.Object3D, boolean>()
 
   // Previous step, kept for render interpolation.
   private readonly prevPosition = new THREE.Vector3()
@@ -319,16 +319,17 @@ export class Car implements Updatable {
   }
 
   /**
-   * Hides materials matching a pattern.
+   * Hides matching model parts for interior camera views.
    * Passing null restores their original visibility.
+   * Only affects this car, not other cars sharing the same materials.
    */
   setHiddenMaterials(pattern: RegExp | null): void {
-    // Restore previously hidden materials.
-    for (const [material, originalVisibility] of this.hiddenMaterials) {
-      material.visible = originalVisibility
+    // Restore meshes hidden by the previous camera view.
+    for (const [mesh, original] of this.hiddenMeshes) {
+      mesh.visible = original
     }
 
-    this.hiddenMaterials.clear()
+    this.hiddenMeshes.clear()
 
     if (!pattern) return
 
@@ -336,25 +337,14 @@ export class Car implements Updatable {
 
     root.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return
+      if (Array.isArray(object.material)) return
 
-      const materials = Array.isArray(object.material)
-        ? object.material
-        : [object.material]
+      pattern.lastIndex = 0
 
-      for (const material of materials) {
-        pattern.lastIndex = 0
+      if (!pattern.test(object.material.name)) return
 
-        if (!pattern.test(material.name)) continue
-
-        if (!this.hiddenMaterials.has(material)) {
-          this.hiddenMaterials.set(
-            material,
-            material.visible,
-          )
-        }
-
-        material.visible = false
-      }
+      this.hiddenMeshes.set(object, object.visible)
+      object.visible = false
     })
   }
 

@@ -4,7 +4,7 @@ const CSS = `
 .view-label {
   position: absolute;
   left: 50%;
-  bottom: 12px;
+  top: 12px;
   transform: translateX(-50%);
   padding: 6px 14px;
   border-radius: 10px;
@@ -24,7 +24,7 @@ const CSS = `
 }
 `
 
-/** A small label at the bottom of the screen that names the current camera view. */
+/** A small label at the top of the screen that names the current camera view. */
 export class ViewLabel {
   private readonly root: HTMLDivElement
   private readonly name: HTMLSpanElement
