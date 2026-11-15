@@ -1,10 +1,16 @@
-import { QUALITIES, QUALITY_LABELS, type Quality } from '@/core/Settings'
+import type { ControlScheme } from '@/core/Input'
+import { CONTROL_SCHEMES } from '@/core/Input'
+import { CONTROL_LABELS, QUALITIES, QUALITY_LABELS, type Quality } from '@/core/Settings'
 
 export interface PauseMenuOptions {
   quality: Quality // the quality shown as selected
   onResume: () => void
   onRestart: () => void
   onQuality: (quality: Quality) => void
+  /** The control scheme shown as selected. Defaults to 'keyboard'. */
+  controls?: ControlScheme
+  /** Called when a control scheme is picked. The Controls section is only shown when this is given. */
+  onControls?: (scheme: ControlScheme) => void
 }
 
 const CSS = `
@@ -26,6 +32,8 @@ const CSS = `
 .pause-root.pause-open { opacity: 1; visibility: visible; }
 .pause-card {
   width: min(380px, 90vw);
+  max-height: 92vh;
+  overflow-y: auto;
   box-sizing: border-box;
   padding: 28px 28px 22px;
   border-radius: 16px;
@@ -38,7 +46,8 @@ const CSS = `
 }
 .pause-title { font: 800 34px/1 system-ui; letter-spacing: 0.06em; text-align: center; }
 .pause-label { margin-bottom: 8px; font: 600 12px system-ui; letter-spacing: 0.12em; opacity: 0.6; }
-.pause-quality { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.pause-choices { display: grid; gap: 8px; }
+.pause-hint { margin-top: 8px; font: 500 12px/1.4 system-ui; opacity: 0.7; }
 .pause-btn {
   appearance: none;
   padding: 11px 10px;
@@ -80,6 +89,11 @@ const KEYS: readonly (readonly [string, string])[] = [
   ['Esc / P', 'Pause and resume'],
 ]
 
+const CONTROL_HINTS: Record<ControlScheme, string> = {
+  keyboard: 'Pick Mouse to steer with the cursor.',
+  mouse: 'Cursor steers. Left button is throttle, right button is brake. The keyboard still works too.',
+}
+
 function button(label: string, className: string, parent: HTMLElement): HTMLButtonElement {
   const node = document.createElement('button')
   node.type = 'button'
@@ -89,11 +103,48 @@ function button(label: string, className: string, parent: HTMLElement): HTMLButt
   return node
 }
 
+/** A titled row of buttons where exactly one is selected: a radio group made of buttons. */
+function buildChoices<T extends string>(
+  parent: HTMLElement,
+  title: string,
+  values: readonly T[],
+  labels: Record<T, string>,
+  onPick: (value: T) => void,
+  focusable: HTMLButtonElement[],
+): { section: HTMLElement; buttons: Map<T, HTMLButtonElement> } {
+  const section = document.createElement('div')
+
+  const heading = document.createElement('div')
+  heading.className = 'pause-label'
+  heading.textContent = title
+
+  const group = document.createElement('div')
+  group.className = 'pause-choices'
+  group.style.gridTemplateColumns = `repeat(${values.length}, 1fr)`
+  group.setAttribute('role', 'radiogroup')
+  group.setAttribute('aria-label', title)
+
+  const buttons = new Map<T, HTMLButtonElement>()
+  for (const value of values) {
+    const choice = button(labels[value], 'pause-btn', group)
+    choice.setAttribute('role', 'radio')
+    choice.addEventListener('click', () => onPick(value))
+    buttons.set(value, choice)
+    focusable.push(choice)
+  }
+
+  section.append(heading, group)
+  parent.appendChild(section)
+  return { section, buttons }
+}
+
 export class PauseMenu {
   private readonly root: HTMLDivElement
   private readonly style: HTMLStyleElement
   private readonly resume: HTMLButtonElement
-  private readonly qualityButtons = new Map<Quality, HTMLButtonElement>()
+  private readonly qualityButtons: Map<Quality, HTMLButtonElement>
+  private readonly controlButtons: Map<ControlScheme, HTMLButtonElement> | null
+  private readonly controlHint: HTMLElement | null
   private readonly focusable: HTMLButtonElement[] = []
   private opened = false
 
@@ -122,27 +173,41 @@ export class PauseMenu {
     this.resume.addEventListener('click', options.onResume)
     this.focusable.push(this.resume)
 
-    // The quality picker is a radio group made of buttons.
-    const qualitySection = document.createElement('div')
-    const qualityLabel = document.createElement('div')
-    qualityLabel.className = 'pause-label'
-    qualityLabel.textContent = 'GRAPHICS QUALITY'
-    const group = document.createElement('div')
-    group.className = 'pause-quality'
-    group.setAttribute('role', 'radiogroup')
-    group.setAttribute('aria-label', 'Graphics quality')
-    for (const quality of QUALITIES) {
-      const choice = button(QUALITY_LABELS[quality], 'pause-btn', group)
-      choice.setAttribute('role', 'radio')
-      choice.addEventListener('click', () => {
+    this.qualityButtons = buildChoices(
+      card,
+      'GRAPHICS QUALITY',
+      QUALITIES,
+      QUALITY_LABELS,
+      (quality) => {
         this.setQuality(quality)
         options.onQuality(quality)
-      })
-      this.qualityButtons.set(quality, choice)
-      this.focusable.push(choice)
+      },
+      this.focusable,
+    ).buttons
+
+    // The controls picker only exists when something is listening for it.
+    const onControls = options.onControls
+    if (onControls) {
+      const controls = buildChoices(
+        card,
+        'CONTROLS',
+        CONTROL_SCHEMES,
+        CONTROL_LABELS,
+        (scheme) => {
+          this.setControls(scheme)
+          onControls(scheme)
+        },
+        this.focusable,
+      )
+      this.controlButtons = controls.buttons
+      this.controlHint = document.createElement('div')
+      this.controlHint.className = 'pause-hint'
+      this.controlHint.setAttribute('aria-live', 'polite')
+      controls.section.appendChild(this.controlHint)
+    } else {
+      this.controlButtons = null
+      this.controlHint = null
     }
-    qualitySection.append(qualityLabel, group)
-    card.appendChild(qualitySection)
 
     const restart = button('RESTART RACE', 'pause-btn', card)
     restart.addEventListener('click', options.onRestart)
@@ -161,6 +226,7 @@ export class PauseMenu {
 
     container.appendChild(this.root)
     this.setQuality(options.quality)
+    this.setControls(options.controls ?? 'keyboard')
     window.addEventListener('keydown', this.onKeyDown)
   }
 
@@ -189,6 +255,13 @@ export class PauseMenu {
   /** Shows which quality is selected. Does not call onQuality, so it is safe to use from a settings listener. */
   setQuality(quality: Quality): void {
     for (const [q, node] of this.qualityButtons) node.setAttribute('aria-checked', String(q === quality))
+  }
+
+  /** Shows which control scheme is selected. Does not call onControls. Does nothing when there is no controls picker. */
+  setControls(scheme: ControlScheme): void {
+    if (!this.controlButtons || !this.controlHint) return
+    for (const [s, node] of this.controlButtons) node.setAttribute('aria-checked', String(s === scheme))
+    this.controlHint.textContent = CONTROL_HINTS[scheme]
   }
 
   dispose(): void {

@@ -38,7 +38,7 @@ const PLAYER_COLOR = 0xd62828
 // Shown immediately, and removed once the car model has loaded (or failed to).
 const loading = new LoadingScreen()
 
-// The saved graphics quality. It is applied below, once the sun and the smoke exist.
+// The saved graphics quality and control scheme. Both are applied below, once what they affect exists.
 const settings = new Settings()
 
 const game = new Game(document.getElementById('app')!)
@@ -106,16 +106,17 @@ function gridPose(slot: number): Pose {
 
 // Player: input, car, camera.
 const input = new Input()
+input.setScheme(settings.controlScheme) // keyboard, or keyboard plus mouse, as last chosen
 const car = new Car(input.controls, {}, PLAYER_COLOR)
 const playerGrid = gridPose(PLAYER_SLOT)
 car.reset(playerGrid.x, playerGrid.z, playerGrid.heading)
 game.scene.add(car.object)
 const rig = new CameraRig(game.camera, car) // after the reset, so it starts behind the car
 
-// Temporary, for tuning the camera positions. In development only, it exposes objects to the
-// browser console, e.g. car.viewAnchors.cockpit.position.set(0, 0.85, -0.2), or game.renderer.info.memory
-// to check for leaks. Delete this line once you are done.
-if (import.meta.env.DEV) Object.assign(window, { car, rig, game, settings })
+// Temporary, for tuning. In development only, it exposes objects to the browser console, e.g.
+// car.viewAnchors.cockpit.position.set(0, 0.85, -0.2), input.mouse.fullLock = 0.45, or
+// game.renderer.info.memory to check for leaks. Delete this line once you are done.
+if (import.meta.env.DEV) Object.assign(window, { car, rig, game, settings, input })
 
 // AI opponents. Each one has its own Controls object, written by its driver.
 // Drivers differ in pace and in the line they take. Keep laneOffset within
@@ -224,12 +225,14 @@ const audio = new AudioEngine()
 
 const pauseMenu = new PauseMenu({
   quality: settings.quality,
+  controls: settings.controlScheme,
   onResume: () => setPaused(false),
   onRestart: () => {
     setPaused(false)
     race.restart()
   },
   onQuality: (quality) => settings.setQuality(quality),
+  onControls: (scheme) => settings.setControlScheme(scheme),
 })
 
 function setPaused(paused: boolean): void {
@@ -252,10 +255,12 @@ const onVisibility = (): void => {
 }
 document.addEventListener('visibilitychange', onVisibility)
 
-// A quality change from anywhere applies at once and shows in the menu.
+// A settings change from anywhere applies at once and shows in the menu.
 const stopSettings = settings.onChange(() => {
   applyQuality()
+  input.setScheme(settings.controlScheme)
   pauseMenu.setQuality(settings.quality)
+  pauseMenu.setControls(settings.controlScheme)
 })
 
 // One reusable dot per AI car, so the render hook creates no garbage.
