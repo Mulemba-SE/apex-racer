@@ -1,18 +1,21 @@
-
 import * as THREE from 'three'
 import type { Car, CarViewPoint } from '@/entities/Car'
 
 /** The camera views. Each one is a rule that turns the car's transform into a camera pose. */
-export type CameraMode = 'chase' | 'far' | 'hood' | 'cockpit'
+export type CameraMode = 'chase' | 'far' | 'hood' | 'cockpit' | 'driver'
+
+/** The views that sit on the car itself. Each one has a mount point on the car's body. */
+type FirstPersonMode = 'hood' | 'cockpit' | 'driver'
 
 /** The order the views come in when the camera key is pressed. */
-export const CAMERA_MODES: readonly CameraMode[] = ['chase', 'far', 'hood', 'cockpit']
+export const CAMERA_MODES: readonly CameraMode[] = ['chase', 'far', 'hood', 'cockpit', 'driver']
 
 export const CAMERA_LABELS: Record<CameraMode, string> = {
   chase: 'CHASE',
   far: 'FAR CHASE',
   hood: 'HOOD',
   cockpit: 'COCKPIT',
+  driver: 'DRIVER',
 }
 
 /** A chase-style view: the camera trails the car and swings round behind it with a delay. */
@@ -65,11 +68,18 @@ export const FAR_CAMERA_CONFIG: CameraRigConfig = {
 }
 
 /**
- * Parts of the model that sit in the driver's line of sight.
+ * Parts of the model that sit in the driver's line of sight. Matched against material names,
+ * and only the meshes of the player's own car are hidden.
  */
 export const COCKPIT_HIDE = /^wiper$/i
 
-export const FIRST_PERSON_VIEWS: Record<'hood' | 'cockpit', FirstPersonConfig> = {
+/**
+ * Parts to hide in the driver view. If something blocks the view, add its material name here,
+ * e.g. /^(wiper|mirror)$/i. You can test a pattern live with car.setHiddenMaterials(/pattern/i).
+ */
+export const DRIVER_HIDE = /^wiper$/i
+
+export const FIRST_PERSON_VIEWS: Record<FirstPersonMode, FirstPersonConfig> = {
   hood: {
     anchor: 'hood',
     near: 0.1,
@@ -87,6 +97,18 @@ export const FIRST_PERSON_VIEWS: Record<'hood' | 'cockpit', FirstPersonConfig> =
     steerYaw: 0.14,
     shake: 1,
     hide: COCKPIT_HIDE,
+  },
+  // Behind the steering wheel. The wheel is only about half a metre from the eye, so the near plane
+  // is small, the head turns only a little into corners (the wheel is doing the turning), and the
+  // shake is gentle, because the wheel is fixed to the car and a hard shake would make it seem to jitter.
+  driver: {
+    anchor: 'driver',
+    near: 0.06,
+    fovBase: 72,
+    fovMax: 86,
+    steerYaw: 0.06,
+    shake: 0.3,
+    hide: DRIVER_HIDE,
   },
 }
 
@@ -106,8 +128,8 @@ function angleDiff(target: number, current: number): number {
   return Math.atan2(Math.sin(d), Math.cos(d))
 }
 
-function isFirstPerson(mode: CameraMode): mode is 'hood' | 'cockpit' {
-  return mode === 'hood' || mode === 'cockpit'
+function isFirstPerson(mode: CameraMode): mode is FirstPersonMode {
+  return mode === 'hood' || mode === 'cockpit' || mode === 'driver'
 }
 
 /** Where the camera is, which way it faces and how it is lensed. */
@@ -134,8 +156,8 @@ export class CameraRig {
   /** Settings of the 'far' view. */
   readonly farConfig: CameraRigConfig
 
-  /** Settings of the 'hood' and 'cockpit' views. */
-  readonly firstPerson: Record<'hood' | 'cockpit', FirstPersonConfig>
+  /** Settings of the 'hood', 'cockpit' and 'driver' views. */
+  readonly firstPerson: Record<FirstPersonMode, FirstPersonConfig>
 
   private readonly camera: THREE.PerspectiveCamera
   private readonly target: Car
@@ -175,6 +197,7 @@ export class CameraRig {
     this.firstPerson = {
       hood: { ...FIRST_PERSON_VIEWS.hood },
       cockpit: { ...FIRST_PERSON_VIEWS.cockpit },
+      driver: { ...FIRST_PERSON_VIEWS.driver },
     }
 
     this.chaseFov = this.config.fovBase

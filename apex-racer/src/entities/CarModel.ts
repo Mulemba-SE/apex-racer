@@ -29,15 +29,29 @@ export interface CarModelOptions {
   wheelMaterialExclude?: RegExp
   /** Which of the wheel materials is the tyre. The tyre decides where each axle is. Defaults to /tyre|tire/i. */
   tyreMaterialPattern?: RegExp
+  /** Materials whose meshes make up the steering wheel, matched against material names. Defaults to /steer/i. */
+  steeringMaterialPattern?: RegExp
 }
 
-/** One wheel, wrapped in two pivots at its centre. Car.animate() turns them. */
+/** One wheel, wrapped in pivots at its centre. Car.animate() turns them. */
 export interface ModelWheel {
   steer: THREE.Object3D // turns about the vertical axis; only moved for front wheels
   spin: THREE.Object3D // turns about its own x axis, which is aligned to the wheel's real axle
   front: boolean
   radius: number // metres
   axle: THREE.Vector3 // the wheel's real axle direction in the car's space; x is positive
+}
+
+/** The steering wheel of a loaded model, wrapped in pivots so Car can turn it. */
+export interface SteeringWheelRig {
+  /** Set rotation.z to turn the wheel. Positive turns it counter-clockwise as the driver sees it. */
+  spin: THREE.Object3D
+  /** The middle of the wheel, in the car's space. */
+  centre: THREE.Vector3
+  /** Unit vector along the steering column, pointing back toward the driver. */
+  axis: THREE.Vector3
+  /** Radius of the wheel in metres. */
+  radius: number
 }
 
 /** Fraction from 0 to 1, or null when the server didn't say how big the file is. */
@@ -52,19 +66,27 @@ const DEFAULT_WHEEL_EXCLUDE = /arch|well|house|guard|fender|brake|caliper|disc|s
 const DEFAULT_WHEEL_MATERIAL_PATTERN = /wheel|tyre|tire|(^|[^a-z])(rim|disc)/i
 const DEFAULT_WHEEL_MATERIAL_EXCLUDE = /steer|caliper|arch/i
 const DEFAULT_TYRE_MATERIAL_PATTERN = /tyre|tire/i
+const DEFAULT_STEERING_MATERIAL_PATTERN = /steer/i
 const MAX_WHEEL_FRACTION = 0.3 // a single wheel is never bigger than this share of the car's length
 const WHEEL_REACH = 1.05 // wheel parts may reach this far beyond the tyre's radius
 const WHEEL_WIDTH_SLACK = 0.1 // metres of extra width allowed beyond the tyre's sides
 const CORNER_KEYS = ['LF', 'RF', 'LB', 'RB'] as const // left/right, front/back; the car faces -Z
 const AXLE_X = new THREE.Vector3(1, 0, 0)
+const AXIS_Z = new THREE.Vector3(0, 0, 1)
 
-// The wheels of each model returned by create(), kept apart from the model itself so that
-// create() can keep returning a plain group.
+// The wheels and steering wheel of each model returned by create(), kept apart from the model
+// itself so that create() can keep returning a plain group.
 const rigs = new WeakMap<THREE.Object3D, ModelWheel[]>()
+const steeringRigs = new WeakMap<THREE.Object3D, SteeringWheelRig>()
 
 /** The wheels found in a model made by CarModelLoader.create(). Empty when none were found. */
 export function wheelsOf(model: THREE.Object3D): readonly ModelWheel[] {
   return rigs.get(model) ?? []
+}
+
+/** The steering wheel found in a model made by CarModelLoader.create(), or null when there is none. */
+export function steeringWheelOf(model: THREE.Object3D): SteeringWheelRig | null {
+  return steeringRigs.get(model) ?? null
 }
 
 /** A tyre measured from its geometry: where its axle is, which way it points, and how big it is. */
@@ -190,6 +212,10 @@ export class CarModelLoader {
     const { wheels, method } = this.rigWheels(root, options, length)
     rigs.set(root, wheels)
     this.report(options.url, root, wheels, method)
+
+    const steering = this.rigSteeringWheel(root, options)
+    if (steering) steeringRigs.set(root, steering)
+    this.reportSteering(options.url, steering)
     return root
   }
 
@@ -211,6 +237,53 @@ export class CarModelLoader {
       if (!(o instanceof THREE.Mesh)) return
       o.material = Array.isArray(o.material) ? o.material.map(tint) : tint(o.material)
     })
+  }
+
+  /**
+   * Finds the steering wheel by material name and wraps its meshes in two pivots at the wheel's
+   * centre: a fixed one that lines its z axis up with the steering column, and a turning one
+   * inside it. The column direction and centre are measured from the vertices, the same way the
+   * road wheels' axles are. Expects `root` to be at the origin with an identity transform.
+   */
+  private rigSteeringWheel(root: THREE.Group, options: CarModelOptions): SteeringWheelRig | null {
+    const pattern = options.steeringMaterialPattern ?? DEFAULT_STEERING_MATERIAL_PATTERN
+    root.updateMatrixWorld(true)
+
+    const meshes: THREE.Mesh[] = []
+    root.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || (o as THREE.SkinnedMesh).isSkinnedMesh) return
+      if (Array.isArray(o.material)) return
+      if (pattern.test(o.material.name)) meshes.push(o)
+    })
+    if (meshes.length === 0) return null
+
+    // Every vertex of the steering meshes, in the car's space.
+    const points: number[] = []
+    const p = new THREE.Vector3()
+    for (const mesh of meshes) {
+      const position = mesh.geometry.getAttribute('position')
+      for (let i = 0; i < position.count; i++) {
+        p.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld)
+        points.push(p.x, p.y, p.z)
+      }
+    }
+
+    // A wheel is thinnest along its column, so the fit gives the column direction.
+    const fit = this.fitWheel(points)
+    if (!fit) return null
+    const axis = fit.axle.clone()
+    if (axis.z < 0) axis.negate() // the car faces -Z, so the driver is behind the wheel, at +z
+
+    const tilt = new THREE.Group()
+    const spin = new THREE.Group()
+    tilt.position.copy(fit.centre)
+    tilt.quaternion.setFromUnitVectors(AXIS_Z, axis)
+    tilt.add(spin)
+    root.add(tilt)
+    root.updateMatrixWorld(true)
+    for (const mesh of meshes) spin.attach(mesh) // keeps each part exactly where it was
+
+    return { spin, centre: fit.centre.clone(), axis, radius: fit.radius }
   }
 
   /**
@@ -406,6 +479,7 @@ export class CarModelLoader {
    * Measures a tyre from its vertices (x, y, z, x, y, z, ...). The axle is the direction in which the
    * tyre is thinnest, so camber and toe come out of the geometry instead of being assumed away.
    * The centre is found by projecting the tyre onto that axle and taking the middle of its extent.
+   * Also used for the steering wheel, which is a flat ring and so has a "thin" direction too.
    */
   private fitWheel(points: number[]): WheelFit | null {
     const n = Math.floor(points.length / 3)
@@ -585,6 +659,34 @@ export class CarModelLoader {
         `Nodes: ${nodes.slice(0, 60).join(', ')}` +
         (nodes.length > 60 ? ` ... (${nodes.length - 60} more)` : ''),
     )
+  }
+
+  /** Says once per model whether a steering wheel was found, and how big and where it is. */
+  private reportSteering(url: string, steering: SteeringWheelRig | null): void {
+    const key = `${url}#steering`
+    if (this.reported.has(key)) return
+    this.reported.add(key)
+
+    if (!steering) {
+      console.warn(
+        `[CarModel] ${url}: no steering wheel found. Set steeringMaterialPattern in MODEL_OPTIONS ` +
+          `in main.ts to match its material name (see the Materials list above).`,
+      )
+      return
+    }
+    const c = steering.centre
+    const a = steering.axis
+    console.info(
+      `[CarModel] ${url}: steering wheel found, diameter ${(steering.radius * 2).toFixed(2)} m, ` +
+        `centre (${c.x.toFixed(2)}, ${c.y.toFixed(2)}, ${c.z.toFixed(2)}), ` +
+        `column direction (${a.x.toFixed(2)}, ${a.y.toFixed(2)}, ${a.z.toFixed(2)})`,
+    )
+    if (steering.radius * 2 > 0.7) {
+      console.warn(
+        `[CarModel] That is a very large steering wheel, so the steering materials probably include ` +
+          `other parts of the interior, and those will turn with it. Narrow steeringMaterialPattern.`,
+      )
+    }
   }
 
   /** Prints what a model contains, once, which is what you need to set `yaw` and `paintPattern`. */
