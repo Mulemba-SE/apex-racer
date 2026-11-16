@@ -71,13 +71,13 @@ export const FAR_CAMERA_CONFIG: CameraRigConfig = {
  * Parts of the model that sit in the driver's line of sight. Matched against material names,
  * and only the meshes of the player's own car are hidden.
  */
-export const COCKPIT_HIDE = /^wiper$/i
-
+export const COCKPIT_HIDE = /^(wiper|d_glass|r_glass|win_int)$/i
 /**
  * Parts to hide in the driver view. If something blocks the view, add its material name here,
  * e.g. /^(wiper|mirror)$/i. You can test a pattern live with car.setHiddenMaterials(/pattern/i).
  */
-export const DRIVER_HIDE = /^wiper$/i
+export const DRIVER_HIDE = /^(wiper|d_glass|r_glass|win_int)$/i
+
 
 export const FIRST_PERSON_VIEWS: Record<FirstPersonMode, FirstPersonConfig> = {
   hood: {

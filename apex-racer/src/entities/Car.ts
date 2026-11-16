@@ -55,7 +55,6 @@ export const GRASS: SurfaceModifiers = { grip: 0.4, traction: 0.5, drag: 0.5 }
 
 const WHEEL_RADIUS = 0.35
 const MAX_WHEEL_LOCK = 0.45 // radians, visual only: how far the road wheels turn
-const STEERING_WHEEL_LOCK = 1.4 // radians, visual only: how far the steering wheel turns (about 80 degrees)
 const MAX_YAW_KICK = 4 // rad/s
 const YAW_KICK_DECAY = 5 // 1/s
 
@@ -93,12 +92,24 @@ export class Car implements Updatable {
   }
 
   /**
-   * Where the driver's eye sits relative to the steering wheel's centre, in metres. `back` is along
-   * the steering column toward the seat, `up` is above the wheel's centre, and `side` is to the
-   * right. After changing a value, call placeDriverEye(). For example, in the browser console:
-   * car.driverEyeOffset.back = 0.5; car.placeDriverEye()
+   * Where the driver's eye sits relative to the steering wheel's centre, in metres, measured in the
+   * car's own frame: `back` is toward the rear of the car, `up` is above the wheel's centre, and `side`
+   * is to the right. After changing a value, call placeDriverEye(). For example, in the browser console:
+   * car.driverEyeOffset.back = 0.4; car.placeDriverEye()
    */
-  readonly driverEyeOffset = { back: 0.55, up: 0.28, side: 0 }
+  readonly driverEyeOffset = { back: 0.45, up: 0.2, side: 0 }
+
+  /**
+   * How the steering wheel moves on screen. It follows your steering with a delay and a speed limit,
+   * the way hands do, instead of snapping with the keyboard. It only changes what you see, not how
+   * the car handles. Safe to change live, e.g. in the browser console: car.steeringWheelFeel.maxSpeed = 2
+   */
+  readonly steeringWheelFeel = {
+    lock: 1.2, // radians the wheel turns each way at full steering (about 70 degrees)
+    speedLock: 0.45, // the share of that lock lost at top speed: a driver turns the wheel less when fast
+    response: 6, // 1/s, how quickly it eases toward where it should be
+    maxSpeed: 3, // radians per second, the fastest it will ever turn (about 170 degrees a second)
+  }
 
   private readonly controls: Controls
   private readonly body = new THREE.Group() // rolls in corners; wheels don't
@@ -114,8 +125,8 @@ export class Car implements Updatable {
 
   private readonly forward = new THREE.Vector3()
   private readonly right = new THREE.Vector3()
-  private readonly eyeDirection = new THREE.Vector3()
   private steerValue = 0 // smoothed steering, -1..1
+  private wheelAngle = 0 // where the steering wheel is shown, in radians; it lags steerValue
   private roll = 0
   private yawKick = 0 // rad/s of extra spin from impacts; decays on its own
 
@@ -249,6 +260,8 @@ export class Car implements Updatable {
     this.velocity.set(0, 0, 0)
     this.heading = heading
     this.steerValue = 0
+    this.wheelAngle = 0
+    if (this.steeringRig) this.steeringRig.spin.rotation.z = 0 // straight at once, not after the next step
     this.roll = 0
     this.yawKick = 0
     this.surface = ASPHALT
@@ -280,13 +293,16 @@ export class Car implements Updatable {
     this.customModel = model
     this.modelWheels = wheelsOf(model)
     this.steeringRig = steeringWheelOf(model)
+    this.wheelAngle = 0 // a new model's steering wheel starts straight
     this.placeDriverEye()
   }
 
   /**
    * Puts the `driver` camera mount behind the steering wheel, at the driver's eye. Called when a
-   * model is loaded, and again after changing `driverEyeOffset`. A car without a steering wheel
-   * (the box-built one) gets a fixed position inside its cabin.
+   * model is loaded, and again after changing `driverEyeOffset`. The offset is measured in the
+   * car's own frame (straight back and up from the wheel's centre), so a steeply raked steering
+   * column can't push the camera above the roof. A car without a steering wheel (the box-built
+   * one) gets a fixed position inside its cabin.
    */
   placeDriverEye(): void {
     const eye = this.viewAnchors.driver
@@ -295,17 +311,8 @@ export class Car implements Updatable {
       eye.position.set(0, 1.15, 0.3)
       return
     }
-
-    // The column points back toward the driver. Its tilt is limited, so a badly fitted axis
-    // can't throw the camera far above or below the wheel.
-    this.eyeDirection.copy(wheel.axis)
-    this.eyeDirection.y = clamp(this.eyeDirection.y, -0.5, 0.5)
-    this.eyeDirection.normalize()
-
     const o = this.driverEyeOffset
-    eye.position.copy(wheel.centre).addScaledVector(this.eyeDirection, o.back)
-    eye.position.x += o.side
-    eye.position.y += o.up
+    eye.position.set(wheel.centre.x + o.side, wheel.centre.y + o.up, wheel.centre.z + o.back)
   }
 
   /**
@@ -357,6 +364,8 @@ export class Car implements Updatable {
 
   /** Visual-only motion: wheel spin, front-wheel steering, steering wheel, body roll. */
   private animate(dt: number, forwardSpeed: number): void {
+    const speedFraction = clamp(Math.abs(forwardSpeed) / this.config.maxSpeed, 0, 1)
+
     const spin = (forwardSpeed * dt) / WHEEL_RADIUS
     for (const wheel of this.wheels) wheel.rotation.x -= spin
     for (const pivot of this.frontPivots) {
@@ -370,12 +379,18 @@ export class Car implements Updatable {
     }
 
     // The steering wheel. Its z axis points back at the driver, so a positive turn is anticlockwise
-    // from the driver's seat, and steering right needs the opposite.
+    // from the driver's seat, and steering right needs the opposite. It eases toward its target and
+    // is capped in speed, so it moves like a hand turning it, not like a switch.
     if (this.steeringRig) {
-      this.steeringRig.spin.rotation.z = -this.steerValue * STEERING_WHEEL_LOCK
+      const feel = this.steeringWheelFeel
+      const lock = feel.lock * (1 - feel.speedLock * speedFraction) // less lock at speed
+      const target = -this.steerValue * lock
+      const ease = (target - this.wheelAngle) * (1 - Math.exp(-feel.response * dt))
+      const limit = feel.maxSpeed * dt
+      this.wheelAngle += clamp(ease, -limit, limit)
+      this.steeringRig.spin.rotation.z = this.wheelAngle
     }
 
-    const speedFraction = clamp(Math.abs(forwardSpeed) / this.config.maxSpeed, 0, 1)
     const targetRoll = this.steerValue * speedFraction * 0.06 // leans outward
     this.roll += (targetRoll - this.roll) * Math.min(1, 8 * dt)
     this.body.rotation.z = this.roll
