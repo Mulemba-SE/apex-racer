@@ -7,14 +7,42 @@ export const QUALITIES: readonly Quality[] = ['low', 'medium', 'high']
 
 export interface QualityPreset {
   pixelRatio: number // the most device pixels per CSS pixel the renderer will draw
+  shadows: boolean // whether the sun casts shadows at all
+  detailedShadows: boolean // true: every car casts its exact shadow. false: a few cheap hidden boxes do
   shadowMapSize: number // pixels per side of the sun's shadow map
   smokeDensity: number // 0..1, how much of the tyre smoke and dust is made
+  buildingDensity: number // 0..1, the share of the planned buildings that are shown
+  treeDensity: number // 0..1, the share of the planned trees that are shown
 }
 
 export const QUALITY_PRESETS: Record<Quality, QualityPreset> = {
-  low: { pixelRatio: 1, shadowMapSize: 1024, smokeDensity: 0.4 },
-  medium: { pixelRatio: 1.5, shadowMapSize: 1024, smokeDensity: 0.7 },
-  high: { pixelRatio: 2, shadowMapSize: 2048, smokeDensity: 1 },
+  low: {
+    pixelRatio: 1,
+    shadows: false,
+    detailedShadows: false,
+    shadowMapSize: 1024,
+    smokeDensity: 0.4,
+    buildingDensity: 0.4,
+    treeDensity: 0.3,
+  },
+  medium: {
+    pixelRatio: 1.5,
+    shadows: true,
+    detailedShadows: false,
+    shadowMapSize: 1024,
+    smokeDensity: 0.7,
+    buildingDensity: 0.7,
+    treeDensity: 0.6,
+  },
+  high: {
+    pixelRatio: 2,
+    shadows: true,
+    detailedShadows: true,
+    shadowMapSize: 2048,
+    smokeDensity: 1,
+    buildingDensity: 1,
+    treeDensity: 1,
+  },
 }
 
 export const QUALITY_LABELS: Record<Quality, string> = {

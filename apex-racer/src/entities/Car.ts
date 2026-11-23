@@ -58,6 +58,19 @@ const MAX_WHEEL_LOCK = 0.45 // radians, visual only: how far the road wheels tur
 const MAX_YAW_KICK = 4 // rad/s
 const YAW_KICK_DECAY = 5 // 1/s
 
+/**
+ * The boxes that stand in for a loaded model when shadows are drawn. Sizes and centres are in the
+ * car's own space, in metres: x is sideways, y is up, and the car faces -z. Change these if the
+ * shadow looks too long, too short, or too fat compared with the car.
+ */
+const SHADOW_BOXES: readonly {
+  size: readonly [number, number, number]
+  position: readonly [number, number, number]
+}[] = [
+  { size: [1.9, 0.5, 4.1], position: [0, 0.45, 0] }, // the low main body
+  { size: [1.0, 0.4, 1.7], position: [0, 0.85, 0.2] }, // the canopy
+]
+
 function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v))
 }
@@ -111,6 +124,14 @@ export class Car implements Updatable {
     maxSpeed: 3, // radians per second, the fastest it will ever turn (about 170 degrees a second)
   }
 
+  /**
+   * The stand-in shadow caster for a loaded model: a few boxes that are not drawn on screen, but are
+   * drawn into the sun's shadow map in place of the detailed model, which has hundreds of thousands
+   * of triangles. It is switched on by setModel(). The children can be adjusted live, e.g. in the
+   * browser console: car.shadowProxy.children[0].scale.z = 1.1
+   */
+  readonly shadowProxy = new THREE.Group()
+
   private readonly controls: Controls
   private readonly body = new THREE.Group() // rolls in corners; wheels don't
   private readonly wheels: THREE.Mesh[] = []
@@ -119,6 +140,7 @@ export class Car implements Updatable {
   private customModel: THREE.Object3D | null = null
   private modelWheels: readonly ModelWheel[] = [] // the loaded model's wheels, if it has any
   private steeringRig: SteeringWheelRig | null = null // the loaded model's steering wheel, if it has one
+  private detailedShadows = false // true: the loaded model casts its own shadow instead of the boxes
 
   // Meshes hidden by setHiddenMaterials(), with their original visibility.
   private readonly hiddenMeshes = new Map<THREE.Object3D, boolean>()
@@ -142,6 +164,7 @@ export class Car implements Updatable {
     this.controls = controls
     this.config = { ...DEFAULT_CAR_CONFIG, ...config }
     this.buildModel(paintColor)
+    this.buildShadowProxy()
 
     // Attach the camera mounts to the body so they follow its movement and roll.
     this.body.add(this.viewAnchors.hood, this.viewAnchors.cockpit, this.viewAnchors.driver)
@@ -275,7 +298,8 @@ export class Car implements Updatable {
    * The model should face -Z, be centred on the origin and sit on the ground, which the
    * loader already guarantees. It rolls in corners with the body. If the loader found the
    * model's wheels they spin and the front pair steers, and if it found a steering wheel it
-   * turns with your steering and the `driver` camera mount is placed behind it.
+   * turns with your steering and the `driver` camera mount is placed behind it. The shadow is
+   * cast by the cheap stand-in boxes instead of the detailed model (see setDetailedShadows()).
    * Calling this again swaps in a different model.
    */
   setModel(model: THREE.Object3D): void {
@@ -286,15 +310,23 @@ export class Car implements Updatable {
       // First swap: the box car's own parts belong to this car alone, so they are freed.
       this.disposeBoxParts()
     }
-    model.traverse((o) => {
-      if (o instanceof THREE.Mesh) o.castShadow = true
-    })
     this.body.add(model)
     this.customModel = model
     this.modelWheels = wheelsOf(model)
     this.steeringRig = steeringWheelOf(model)
     this.wheelAngle = 0 // a new model's steering wheel starts straight
     this.placeDriverEye()
+    this.applyShadowMode()
+  }
+
+  /**
+   * Chooses what casts this car's shadow once a model is loaded. false (the default): a few cheap
+   * hidden boxes do, which is much faster to draw. true: the detailed model casts its own exact
+   * shadow, which costs the whole model a second time. Has no effect on the box-built car.
+   */
+  setDetailedShadows(detailed: boolean): void {
+    this.detailedShadows = detailed
+    this.applyShadowMode()
   }
 
   /**
@@ -335,10 +367,37 @@ export class Car implements Updatable {
     })
   }
 
+  /**
+   * Builds the stand-in shadow caster. Nothing is written to the screen (no colour, no depth), but
+   * the boxes are still drawn into the shadow map. It stays switched off until a model is loaded,
+   * because the box-built car casts its own shadow.
+   */
+  private buildShadowProxy(): void {
+    const material = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false })
+    for (const box of SHADOW_BOXES) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...box.size), material)
+      mesh.position.set(...box.position)
+      mesh.castShadow = true
+      this.shadowProxy.add(mesh)
+    }
+    this.shadowProxy.visible = false
+    this.body.add(this.shadowProxy)
+  }
+
+  /** Makes either the boxes or the detailed model cast the shadow. Does nothing until a model is loaded. */
+  private applyShadowMode(): void {
+    const model = this.customModel
+    if (!model) return // the box-built car casts its own shadow
+    this.shadowProxy.visible = !this.detailedShadows
+    model.traverse((o) => {
+      if (o instanceof THREE.Mesh) o.castShadow = this.detailedShadows
+    })
+  }
+
   private disposeBoxParts(): void {
-    const mounts = new Set<THREE.Object3D>(Object.values(this.viewAnchors))
-    // Everything on the body except the camera mounts, which must survive the swap.
-    const bodyParts = this.body.children.filter((child) => !mounts.has(child))
+    // Everything on the body except the camera mounts and the shadow boxes, which must survive the swap.
+    const keep = new Set<THREE.Object3D>([...Object.values(this.viewAnchors), this.shadowProxy])
+    const bodyParts = this.body.children.filter((child) => !keep.has(child))
     const parts: THREE.Object3D[] = [...bodyParts, ...this.wheelPivots] // copied first, since removal changes the lists
     for (const part of parts) {
       part.traverse((o) => {

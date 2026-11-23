@@ -5,8 +5,11 @@ import { Game } from '@/core/Game'
 import { Input, type Controls } from '@/core/Input'
 import { RaceController } from '@/core/RaceController'
 import { Settings } from '@/core/Settings'
+import { Buildings } from '@/entities/Buildings'
 import { Car } from '@/entities/Car'
 import { CarModelLoader, type CarModelOptions } from '@/entities/CarModel'
+import { createFacadeStyles, disposeFacadeStyles } from '@/entities/FacadeTextures'
+import { Props } from '@/entities/Props'
 import { Track } from '@/entities/Track'
 import { TrackData, CIRCUIT_ONE, type Pose } from '@/entities/TrackData'
 import { AIDriver, type AIOptions } from '@/systems/AIDriver'
@@ -17,6 +20,7 @@ import { SkidMarks } from '@/systems/SkidMarks'
 import { Smoke } from '@/systems/Smoke'
 import { Standings } from '@/systems/Standings'
 import { TrackCollision } from '@/systems/TrackCollision'
+import { TrackSpace } from '@/systems/TrackSpace'
 import { Hud } from '@/ui/Hud'
 import { LoadingScreen } from '@/ui/LoadingScreen'
 import { Minimap, type MinimapDot } from '@/ui/Minimap'
@@ -25,17 +29,27 @@ import { ViewLabel } from '@/ui/ViewLabel'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
 
-// The car model, served from public/models/car.glb. BASE_URL keeps the path correct
-// when the game is hosted in a sub-folder (GitHub Pages, for example).
+// The car models, served from public/models. BASE_URL keeps the paths correct when the game
+// is hosted in a sub-folder (GitHub Pages, for example).
+// The player's car uses the full model. The AI cars use a simplified copy (car-lite.glb), because
+// they are seen from a distance and cost far less to draw. If the lite file is missing, they fall
+// back to the full model.
 const MODEL_URL = `${import.meta.env.BASE_URL}models/car.glb`
-const MODEL_TIMEOUT_MS = 15000
+const MODEL_LITE_URL = `${import.meta.env.BASE_URL}models/car-lite.glb`
+const MODEL_TIMEOUT_MS = 30000
 const MODEL_OPTIONS: Omit<CarModelOptions, 'url' | 'paintColor'> = {
   yaw: Math.PI, // 0 if the car drives backwards, +-Math.PI / 2 if it points sideways
   // paintPattern: /body|paint/i, // which material names count as paint; see the console message
 }
 const PLAYER_COLOR = 0xd62828
 
-// Shown immediately, and removed once the car model has loaded (or failed to).
+// Parts of the model that only matter from inside the car. The AI cars are only seen from outside,
+// so these are not drawn on them, which saves draw calls and triangles. The names come from the
+// model's material list in the console.
+const AI_HIDDEN_MATERIALS =
+  /^(interior|carbon_int|alca_int|steer_plastic|steer_alca|steer_metal|carbon_steer|hud|CSR2_InteriorA)$/i
+
+// Shown immediately, and removed once the car models have loaded (or failed to).
 const loading = new LoadingScreen()
 
 // The saved graphics quality and control scheme. Both are applied below, once what they affect exists.
@@ -52,7 +66,8 @@ game.scene.background = new THREE.Color(SKY)
 game.scene.fog = new THREE.Fog(SKY, 200, 1000)
 
 // Lighting. The sun follows the player's car (see the render hook below), so the
-// shadow map only has to cover the area around it. Its resolution comes from the quality setting.
+// shadow map only has to cover the area around it. Whether it casts shadows, and the resolution of
+// its shadow map, come from the quality setting.
 game.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.0))
 const sun = new THREE.DirectionalLight(0xffffff, 2.2)
 const SUN_OFFSET = new THREE.Vector3(30, 50, 20)
@@ -79,6 +94,18 @@ game.scene.add(grass)
 // Track
 const track = new Track(new TrackData(CIRCUIT_ONE))
 game.scene.add(track.object)
+
+// Scenery: buildings, trees, street lamps and a grandstand. It is planned once, using one shared
+// TrackSpace so nothing stands on any part of the road. The quality presets decide how much of it
+// is shown, and none of it casts or receives shadows.
+const scenery = settings.preset
+const facades = createFacadeStyles(Math.min(4, game.renderer.capabilities.getMaxAnisotropy()))
+const space = new TrackSpace(track.data)
+const buildings = new Buildings(space, facades, { density: scenery.buildingDensity })
+game.scene.add(buildings.object)
+const props = new Props(space, buildings.footprints, { treeDensity: scenery.treeDensity })
+game.scene.add(props.object)
+let sceneryQuality = settings.quality // the quality the scenery was last built for
 
 // ---------------------------------------------------------------------------
 // Starting grid: slot 0 is pole position. `back` is metres behind the start
@@ -116,7 +143,7 @@ const rig = new CameraRig(game.camera, car) // after the reset, so it starts beh
 // Temporary, for tuning. In development only, it exposes objects to the browser console, e.g.
 // car.viewAnchors.cockpit.position.set(0, 0.85, -0.2), input.mouse.fullLock = 0.45, or
 // game.renderer.info.memory to check for leaks. Delete this line once you are done.
-if (import.meta.env.DEV) Object.assign(window, { car, rig, game, settings, input })
+if (import.meta.env.DEV) Object.assign(window, { car, rig, game, settings, input, buildings, props, space })
 
 // AI opponents. Each one has its own Controls object, written by its driver.
 // Drivers differ in pace and in the line they take. Keep laneOffset within
@@ -154,12 +181,27 @@ game.scene.add(skidMarks.object)
 const smoke = new Smoke([car, ...bots.map((b) => b.car)])
 game.scene.add(smoke.object)
 
-// Graphics quality: how sharp the picture is, how detailed the shadows are, how thick the smoke is.
+// Graphics quality: how sharp the picture is, whether and how the sun casts shadows, how thick the
+// smoke is, and how much scenery is shown. Called at start-up and whenever the quality changes.
 function applyQuality(): void {
   const preset = settings.preset
   game.setMaxPixelRatio(preset.pixelRatio)
+
+  // Turning the sun's shadows on or off makes the renderer rebuild its shaders once, so the picture
+  // may hitch for a moment when this changes. Nothing else needs doing: with no shadow-casting light,
+  // surfaces skip the shadow lookup as well.
+  sun.castShadow = preset.shadows
   game.setShadowMapSize(sun, preset.shadowMapSize)
+  for (const c of [car, ...bots.map((b) => b.car)]) c.setDetailedShadows(preset.detailedShadows)
+
   smoke.density = preset.smokeDensity
+
+  // The scenery is only rebuilt when the quality actually changed, not for every setting change.
+  if (settings.quality !== sceneryQuality) {
+    sceneryQuality = settings.quality
+    buildings.setDensity(preset.buildingDensity)
+    props.setTreeDensity(preset.treeDensity)
+  }
 }
 applyQuality()
 
@@ -355,23 +397,38 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
 
 async function loadCarModels(): Promise<void> {
   const loader = new CarModelLoader()
-  await loader.load(MODEL_URL, (fraction) => loading.setProgress(fraction)) // downloads the file once
+
+  // The lite model downloads at the same time as the full one. A failure here is not fatal: the AI
+  // cars simply use the full model instead. The error is handled here, so it can't go unreported.
+  const liteReady = loader.load(MODEL_LITE_URL).then(
+    () => true,
+    (error) => {
+      console.warn('Lite car model unavailable, the AI cars will use the full model:', error)
+      return false
+    },
+  )
+
+  await loader.load(MODEL_URL, (fraction) => loading.setProgress(fraction)) // the progress bar follows the big file
   loading.setStatus('PREPARING')
+  const aiUrl = (await liteReady) ? MODEL_LITE_URL : MODEL_URL
 
   const all = [
-    { car, color: PLAYER_COLOR },
-    ...bots.map((b) => ({ car: b.car, color: b.color })),
+    { car, color: PLAYER_COLOR, player: true },
+    ...bots.map((b) => ({ car: b.car, color: b.color, player: false })),
   ]
   for (const entry of all) {
     // Each car gets its own copy, repainted in its own colour. The geometry is shared.
-    const model = await loader.create({ url: MODEL_URL, ...MODEL_OPTIONS, paintColor: entry.color })
+    const url = entry.player ? MODEL_URL : aiUrl
+    const model = await loader.create({ url, ...MODEL_OPTIONS, paintColor: entry.color })
     entry.car.setModel(model)
+    // The AI cars are only seen from outside, so their cockpit is not drawn. Your own car keeps it.
+    if (!entry.player) entry.car.setHiddenMaterials(AI_HIDDEN_MATERIALS)
   }
 }
 
 let disposed = false
 
-withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car model')
+withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car models')
   .catch((error) => {
     // Any failure (a missing file, a corrupt file, a slow network) leaves the box cars in place.
     console.warn('Car model unavailable, using the built-in car instead:', error)
@@ -402,6 +459,9 @@ import.meta.hot?.dispose(() => {
   hud.dispose()
   smoke.dispose()
   skidMarks.dispose()
+  props.dispose()
+  buildings.dispose()
+  disposeFacadeStyles(facades)
   track.dispose()
   game.dispose()
 })
