@@ -8,6 +8,8 @@ import { Settings } from '@/core/Settings'
 import { Buildings } from '@/entities/Buildings'
 import { Car } from '@/entities/Car'
 import { CarModelLoader, type CarModelOptions } from '@/entities/CarModel'
+import { CharacterAnimator } from '@/entities/CharacterAnimator'
+import { CharacterLoader, type Character } from '@/entities/CharacterModel'
 import { createFacadeStyles, disposeFacadeStyles } from '@/entities/FacadeTextures'
 import { Props } from '@/entities/Props'
 import { Track } from '@/entities/Track'
@@ -15,7 +17,9 @@ import { TrackData, CIRCUIT_ONE, type Pose } from '@/entities/TrackData'
 import { AIDriver, type AIOptions } from '@/systems/AIDriver'
 import { CameraRig } from '@/systems/CameraRig'
 import { CarCollision } from '@/systems/CarCollision'
+import { FootCamera } from '@/systems/FootCamera'
 import { LapTracker } from '@/systems/LapTracker'
+import { PlayerOnFoot } from '@/systems/PlayerOnFoot'
 import { SkidMarks } from '@/systems/SkidMarks'
 import { Smoke } from '@/systems/Smoke'
 import { Standings } from '@/systems/Standings'
@@ -25,6 +29,7 @@ import { Hud } from '@/ui/Hud'
 import { LoadingScreen } from '@/ui/LoadingScreen'
 import { Minimap, type MinimapDot } from '@/ui/Minimap'
 import { PauseMenu } from '@/ui/PauseMenu'
+import { Prompt } from '@/ui/Prompt'
 import { ViewLabel } from '@/ui/ViewLabel'
 
 const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
@@ -36,6 +41,7 @@ const TOTAL_LAPS = 3 // set to 1 while testing if you want a quick finish
 // back to the full model.
 const MODEL_URL = `${import.meta.env.BASE_URL}models/car.glb`
 const MODEL_LITE_URL = `${import.meta.env.BASE_URL}models/car-lite.glb`
+const CHARACTER_URL = `${import.meta.env.BASE_URL}models/character.glb`
 const MODEL_TIMEOUT_MS = 30000
 const MODEL_OPTIONS: Omit<CarModelOptions, 'url' | 'paintColor'> = {
   yaw: Math.PI, // 0 if the car drives backwards, +-Math.PI / 2 if it points sideways
@@ -48,6 +54,10 @@ const PLAYER_COLOR = 0xd62828
 // model's material list in the console.
 const AI_HIDDEN_MATERIALS =
   /^(interior|carbon_int|alca_int|steer_plastic|steer_alca|steer_metal|carbon_steer|hud|CSR2_InteriorA)$/i
+
+// Getting in and out of the car.
+const ENTER_DISTANCE = 3.2 // metres: how close she must be to the car to get in
+const EXIT_MAX_SPEED = 2 // m/s: the car must be this slow to get out of it
 
 // Shown immediately, and removed once the car models have loaded (or failed to).
 const loading = new LoadingScreen()
@@ -65,8 +75,8 @@ const SKY = 0x87b8e8
 game.scene.background = new THREE.Color(SKY)
 game.scene.fog = new THREE.Fog(SKY, 200, 1000)
 
-// Lighting. The sun follows the player's car (see the render hook below), so the
-// shadow map only has to cover the area around it. Whether it casts shadows, and the resolution of
+// Lighting. The sun follows whoever the player is controlling (see the render hook below), so the
+// shadow map only has to cover the area around them. Whether it casts shadows, and the resolution of
 // its shadow map, come from the quality setting.
 game.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.0))
 const sun = new THREE.DirectionalLight(0xffffff, 2.2)
@@ -106,6 +116,12 @@ game.scene.add(buildings.object)
 const props = new Props(space, buildings.footprints, { treeDensity: scenery.treeDensity })
 game.scene.add(props.object)
 let sceneryQuality = settings.quality // the quality the scenery was last built for
+
+// The character on foot. These are filled in once her model has loaded (see setupOnFoot). They are
+// declared here, before anything uses them, so that applyQuality() below can reach them.
+let character: Character | null = null
+let player: PlayerOnFoot | null = null
+let footCam: FootCamera | null = null
 
 // ---------------------------------------------------------------------------
 // Starting grid: slot 0 is pole position. `back` is metres behind the start
@@ -193,6 +209,7 @@ function applyQuality(): void {
   sun.castShadow = preset.shadows
   game.setShadowMapSize(sun, preset.shadowMapSize)
   for (const c of [car, ...bots.map((b) => b.car)]) c.setDetailedShadows(preset.detailedShadows)
+  character?.setDetailedShadows(preset.detailedShadows)
 
   smoke.density = preset.smokeDensity
 
@@ -229,19 +246,22 @@ const race = new RaceController({
   },
 })
 
-// The AI drives, and positions are tracked, from GO onwards. Both carry on
-// after you finish, so the AI cars can still earn their places.
-race.onStateChange = (state) => {
-  const running = state === 'racing' || state === 'finished'
-  for (const bot of bots) bot.driver.enabled = running
+// The AI drives, and positions are tracked, from GO onwards. Both carry on after you finish, so the
+// AI cars can still earn their places. The AI waits while the player is walking around on foot.
+function updateAIEnabled(): void {
+  const running = race.state === 'racing' || race.state === 'finished'
   standings.active = running
+  const walking = player !== null && player.active
+  for (const bot of bots) bot.driver.enabled = running && !walking
 }
+race.onStateChange = () => updateAIEnabled()
 
 // Fixed-step order matters:
 // the input is sampled, the race controller applies locks and brakes, the AI
 // drivers press their pedals, every car moves, cars push each other apart, each
 // wall collision then corrects its own car (so the walls have the last word),
-// and the tracker and standings read the final positions.
+// and the tracker and standings read the final positions. The character on foot is added to this
+// list when she has loaded, after all of these.
 game.add(input)
 game.add(race)
 for (const bot of bots) game.add(bot.driver)
@@ -259,7 +279,54 @@ const hud = new Hud(hudContainer)
 const minimap = new Minimap(hudContainer, track.data)
 const viewLabel = new ViewLabel(hudContainer)
 viewLabel.set(rig.mode)
+const hint = new Prompt(hudContainer)
 const audio = new AudioEngine()
+
+// ---------------------------------------------------------------------------
+// Getting out of the car and back in.
+// ---------------------------------------------------------------------------
+
+function getOutOfCar(p: PlayerOnFoot): void {
+  p.getOut(car)
+  input.setTarget('foot')
+  footCam?.activate(p.heading)
+  updateAIEnabled()
+}
+
+function getInCar(p: PlayerOnFoot): void {
+  p.getIn()
+  input.setTarget('car')
+  rig.snap()
+  updateAIEnabled()
+}
+
+/** True when she could get out of the car right now. */
+function canGetOut(): boolean {
+  return (
+    player !== null &&
+    !player.active &&
+    (race.state === 'menu' || race.state === 'finished') &&
+    car.velocity.length() < EXIT_MAX_SPEED
+  )
+}
+
+/** The F key: get out of the car, or get back in. Says why when it can't. */
+function interact(): void {
+  const p = player
+  if (p === null || game.isPaused) return
+  if (p.active) {
+    if (p.distanceToCar(car) < ENTER_DISTANCE) getInCar(p)
+    else hint.flash('Walk up to your car to get in')
+    return
+  }
+  if (race.state !== 'menu' && race.state !== 'finished') {
+    hint.flash('Finish or restart the race first')
+  } else if (car.velocity.length() >= EXIT_MAX_SPEED) {
+    hint.flash('Stop the car first')
+  } else {
+    getOutOfCar(p)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Pause. The simulation stops, the screen keeps drawing, and the menu opens.
@@ -271,6 +338,7 @@ const pauseMenu = new PauseMenu({
   onResume: () => setPaused(false),
   onRestart: () => {
     setPaused(false)
+    if (player !== null && player.active) getInCar(player) // back in the car first, so the restart finds it on the grid
     race.restart()
   },
   onQuality: (quality) => settings.setQuality(quality),
@@ -307,6 +375,7 @@ const stopSettings = settings.onChange(() => {
 
 // One reusable dot per AI car, so the render hook creates no garbage.
 const dots: MinimapDot[] = bots.map((b) => ({ x: 0, z: 0, color: b.color }))
+const look = { x: 0, y: 0 } // the mouse drag that turns the walking camera, read once per frame
 
 race.onCountdownTick = (value) => audio.countdownTick(value)
 race.onLap = (result) => {
@@ -319,21 +388,35 @@ carCollision.onImpact = (speed, a, b) => {
   if (a === car || b === car) audio.impact(speed) // only crashes involving the player are audible
 }
 
-// Once per display frame: check the pause key, place every car between its last two physics steps,
-// update the tyre marks, move the camera to follow the player, update the smoke
-// (it reads the camera's field of view), keep the sun's shadow box over the
-// player, then refresh the HUD, minimap and audio. This keeps running while paused.
+// Once per display frame: check the pause key and the F key, place every car (and the character, if she
+// is walking) between its last two physics steps, update the tyre marks, move the camera to follow
+// whoever the player controls, update the smoke (it reads the camera's field of view), keep the sun's
+// shadow box over them, then refresh the HUD, minimap, prompt and audio. This keeps running while paused.
 game.addRenderHook((alpha, frameDt) => {
   if (input.consumePause()) setPaused(!game.isPaused)
+  if (input.consumeInteract()) interact()
+
+  const walker = player !== null && player.active ? player : null
 
   car.interpolate(alpha)
   for (const bot of bots) bot.car.interpolate(alpha)
   skidMarks.update() // after every car is interpolated: the marks follow the visual positions
-  if (input.consumeCamera()) viewLabel.set(rig.cycle()) // before the update, so the blend starts this frame
-  rig.update(frameDt)
+
+  const cameraPressed = input.consumeCamera()
+  if (walker !== null && footCam !== null) {
+    walker.interpolate(alpha)
+    walker.animate(frameDt)
+    input.takeLook(look)
+    footCam.update(frameDt, look.x, look.y, input.foot.look, walker.speed)
+  } else {
+    if (cameraPressed) viewLabel.set(rig.cycle()) // before the update, so the blend starts this frame
+    rig.update(frameDt)
+  }
+
   smoke.update(frameDt, game.camera, game.renderer.domElement.height)
-  sun.position.copy(car.object.position).add(SUN_OFFSET)
-  sun.target.position.copy(car.object.position)
+  const focus = walker !== null ? walker.object : car.object
+  sun.position.copy(focus.position).add(SUN_OFFSET)
+  sun.target.position.copy(focus.position)
 
   const speedFraction = car.velocity.length() / car.config.maxSpeed
 
@@ -352,12 +435,22 @@ game.addRenderHook((alpha, frameDt) => {
     racers: standings.count,
   })
 
+  // The "F" hint: get in when she is next to the car, get out when the car is stopped and that is allowed.
+  if (walker !== null) {
+    if (walker.distanceToCar(car) < ENTER_DISTANCE) hint.show('F', 'Get in')
+    else hint.hide()
+  } else if (canGetOut()) {
+    hint.show('F', 'Get out')
+  } else {
+    hint.hide()
+  }
+
   bots.forEach((bot, i) => {
     const dot = dots[i]!
     dot.x = bot.car.object.position.x
     dot.z = bot.car.object.position.z
   })
-  minimap.update(car.object.position.x, car.object.position.z, car.object.rotation.y, dots)
+  minimap.update(focus.position.x, focus.position.z, focus.rotation.y, dots)
 
   // Sideways speed in m/s: the part of the velocity along the car's right-hand axis.
   const sin = Math.sin(car.heading)
@@ -365,7 +458,7 @@ game.addRenderHook((alpha, frameDt) => {
   const slip = car.velocity.x * cos - car.velocity.z * sin
 
   audio.update({
-    engineOn: race.state !== 'menu' && !game.isPaused, // the engine, tyres and wind fade out while paused
+    engineOn: race.state !== 'menu' && !game.isPaused && walker === null, // the engine is off while she is on foot
     speedFraction,
     throttle: input.controls.throttle,
     slip,
@@ -373,7 +466,7 @@ game.addRenderHook((alpha, frameDt) => {
 })
 
 // ---------------------------------------------------------------------------
-// Car models. The game only starts once they have loaded, or failed to.
+// Models. The game only starts once they have loaded, or failed to.
 // ---------------------------------------------------------------------------
 
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -426,7 +519,48 @@ async function loadCarModels(): Promise<void> {
   }
 }
 
+// The character downloads at the same time as the cars. A failure is not fatal: the game works
+// without her, and F simply does nothing.
+const characterLoader = new CharacterLoader()
+
+async function loadCharacter(): Promise<Character | null> {
+  try {
+    return await withTimeout(characterLoader.create({ url: CHARACTER_URL }), MODEL_TIMEOUT_MS, 'Loading the character')
+  } catch (error) {
+    console.warn('Character unavailable, so you will not be able to get out of the car:', error)
+    return null
+  }
+}
+
+/** Puts the loaded character into the game: her animation, her camera, and her movement. She starts hidden, in the car. */
+function setupOnFoot(girl: Character): void {
+  character = girl
+  girl.setDetailedShadows(settings.preset.detailedShadows)
+  game.scene.add(girl.object)
+
+  const animator = new CharacterAnimator(girl) // right away, while she is still in her rest pose
+  const cam = new FootCamera(game.camera, girl.object)
+  cam.setObstacles(buildings.footprints)
+  const p = new PlayerOnFoot({
+    character: girl,
+    animator,
+    input,
+    space,
+    cameraYaw: () => cam.yaw,
+    buildings: buildings.footprints,
+    cars: [car, ...bots.map((b) => b.car)],
+  })
+  game.add(p) // after the cars and their collisions, so she is pushed out of where they ended up
+  player = p
+  footCam = cam
+
+  // Temporary, for tuning, e.g. anim.tuning.swingSign = -1 or footCam.config.distance = 5. In development only.
+  if (import.meta.env.DEV) Object.assign(window, { girl, player: p, footCam: cam, anim: animator })
+}
+
 let disposed = false
+
+const characterReady = loadCharacter() // starts at once, in parallel with the cars
 
 withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car models')
   .catch((error) => {
@@ -434,12 +568,15 @@ withTimeout(loadCarModels(), MODEL_TIMEOUT_MS, 'Loading the car models')
     console.warn('Car model unavailable, using the built-in car instead:', error)
   })
   .then(async () => {
+    const girl = await characterReady // never rejects: a failure gives null
     if (disposed) return // the module was hot-reloaded while loading
+    if (girl !== null) setupOnFoot(girl)
     // Keys pressed during loading were queued by the input layer; drop them so the race doesn't start early.
     input.consumeConfirm()
     input.consumeReset()
     input.consumeCamera()
     input.consumePause()
+    input.consumeInteract()
     game.renderer.compile(game.scene, game.camera) // builds the shaders now, so the first frames don't hitch
     game.start()
     await loading.hide()
@@ -451,6 +588,7 @@ import.meta.hot?.dispose(() => {
   document.removeEventListener('visibilitychange', onVisibility)
   stopSettings()
   pauseMenu.dispose()
+  hint.dispose()
   loading.dispose()
   input.dispose()
   audio.dispose()
@@ -459,6 +597,8 @@ import.meta.hot?.dispose(() => {
   hud.dispose()
   smoke.dispose()
   skidMarks.dispose()
+  character?.dispose()
+  characterLoader.dispose()
   props.dispose()
   buildings.dispose()
   disposeFacadeStyles(facades)
